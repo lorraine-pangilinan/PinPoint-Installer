@@ -1,0 +1,15 @@
+# Ignore extracted Ubuntu ISO
+extracted-iso/
+
+# Ignore mounted ISO
+mount/
+
+# Ignore build output
+build/
+
+# Ignore downloaded ISO
+original-iso/
+
+# Temporary files
+*.swp
+*.tmp
