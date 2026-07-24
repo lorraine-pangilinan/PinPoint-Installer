@@ -1,0 +1,31 @@
+#cloud-config
+autoinstall:
+  version: 1
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  timezone: Asia/Manila
+
+  identity:
+    hostname: pinpointv1-server
+    username: pinpointadmin
+    password: $6$AqpJqcPNiPe6ixjZ$3kzjfPiMBDbumsJWLEkaj5l7pNNS5rMd45uu2D88vShmIR7Mu.a37m4pKIiP6ZtTEbvMML9mm549A.AS6cROs.
+
+  ssh:
+    install-server: true
+    allow-pw: true
+
+  packages:
+    - openssh-server
+    - curl
+    - wget
+    - git
+
+  package_update: true
+  package_upgrade: true
+
+  updates: security
+
+  shutdown: reboot
