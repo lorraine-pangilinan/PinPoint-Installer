@@ -2,17 +2,6 @@
 autoinstall:
   version: 1
 
-  locale: en_US.UTF-8
-  keyboard:
-    layout: us
-
-  timezone: Asia/Manila
-
-  identity:
-    hostname: pinpointv1-server
-    username: pinpointadmin
-    password: $6$AqpJqcPNiPe6ixjZ$3kzjfPiMBDbumsJWLEkaj5l7pNNS5rMd45uu2D88vShmIR7Mu.a37m4pKIiP6ZtTEbvMML9mm549A.AS6cROs.
-
   ssh:
     install-server: true
     allow-pw: true
@@ -27,5 +16,13 @@ autoinstall:
   package_upgrade: true
 
   updates: security
+
+  late-commands:
+    - mkdir -p /target/root/pinpoint
+    - cp -r /cdrom/pinpoint/* /target/root/pinpoint/
+    - cp /target/root/pinpoint/pinpoint-firstboot.sh /target/usr/local/bin/
+    - curtin in-target -- chmod +x /usr/local/bin/pinpoint-firstboot.sh
+    - cp /target/root/pinpoint/pinpoint-firstboot.service /target/etc/systemd/system/
+    - curtin in-target -- systemctl enable pinpoint-firstboot.service
 
   shutdown: reboot

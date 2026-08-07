@@ -6,9 +6,30 @@ PROJECT="$HOME/PinPoint-Installer"
 ISO_DIR="$PROJECT/extracted-iso"
 BUILD_DIR="$PROJECT/build"
 
+PINPOINT_DIR="$ISO_DIR/pinpoint"
+AUTOINSTALL_DIR="$ISO_DIR/nocloud"
+
 echo "=========================================="
 echo " PinPoint Installer Build Script"
 echo "=========================================="
+
+echo "[0/4] Staging latest installer files..."
+
+mkdir -p "$PINPOINT_DIR"
+
+# Installation scripts
+cp "$PROJECT/scripts/install-packages.sh" "$PINPOINT_DIR/"
+cp "$PROJECT/scripts/install-nagios-core.sh" "$PINPOINT_DIR/"
+cp "$PROJECT/scripts/install-nagios-plugins.sh" "$PINPOINT_DIR/"
+cp "$PROJECT/scripts/configure-snmp.sh" "$PINPOINT_DIR/"
+cp "$PROJECT/scripts/configure-nagios.sh" "$PINPOINT_DIR/"
+
+# First boot
+cp "$PROJECT/firstboot/pinpoint-firstboot.sh" "$PINPOINT_DIR/"
+
+# Autoinstall files
+cp "$PROJECT/autoinstall/user-data" "$AUTOINSTALL_DIR/"
+cp "$PROJECT/autoinstall/meta-data" "$AUTOINSTALL_DIR/"
 
 echo "[1/3] Updating md5sum.txt..."
 
