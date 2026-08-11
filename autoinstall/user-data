@@ -2,6 +2,12 @@
 autoinstall:
   version: 1
 
+  interactive-sections:
+    - locale
+    - keyboard
+    - timezone
+    - identity
+
   ssh:
     install-server: true
     allow-pw: true

@@ -1,8 +1,13 @@
 #!/bin/bash
 
+##################################################
+# PinPoint ISO Build Script
+##################################################
+
 set -e
 
 PROJECT="$HOME/PinPoint-Installer"
+
 ISO_DIR="$PROJECT/extracted-iso"
 BUILD_DIR="$PROJECT/build"
 
@@ -10,28 +15,40 @@ PINPOINT_DIR="$ISO_DIR/pinpoint"
 AUTOINSTALL_DIR="$ISO_DIR/nocloud"
 
 echo "=========================================="
-echo " PinPoint Installer Build Script"
+echo "      PinPoint ISO Build Script"
 echo "=========================================="
+echo
+
+##################################################
+# Stage Latest Files
+##################################################
 
 echo "[0/4] Staging latest installer files..."
 
+rm -rf "$PINPOINT_DIR"
 mkdir -p "$PINPOINT_DIR"
 
-# Installation scripts
-cp "$PROJECT/scripts/install-packages.sh" "$PINPOINT_DIR/"
-cp "$PROJECT/scripts/install-nagios-core.sh" "$PINPOINT_DIR/"
-cp "$PROJECT/scripts/install-nagios-plugins.sh" "$PINPOINT_DIR/"
-cp "$PROJECT/scripts/configure-snmp.sh" "$PINPOINT_DIR/"
-cp "$PROJECT/scripts/configure-nagios.sh" "$PINPOINT_DIR/"
+echo "Copying setup modules..."
 
-# First boot
-cp "$PROJECT/firstboot/pinpoint-firstboot.sh" "$PINPOINT_DIR/"
+cp "$PROJECT/setup/"*.sh "$PINPOINT_DIR/"
 
-# Autoinstall files
+echo "Copying first boot files..."
+
+cp "$PROJECT/firstboot/"* "$PINPOINT_DIR/"
+
+echo "Copying autoinstall configuration..."
+
 cp "$PROJECT/autoinstall/user-data" "$AUTOINSTALL_DIR/"
 cp "$PROJECT/autoinstall/meta-data" "$AUTOINSTALL_DIR/"
 
-echo "[1/3] Updating md5sum.txt..."
+echo "✓ Latest installer files staged."
+
+##################################################
+# Update md5sum
+##################################################
+
+echo
+echo "[1/4] Updating md5sum.txt..."
 
 cd "$ISO_DIR"
 
@@ -41,11 +58,25 @@ find . -type f ! -name "md5sum.txt" -print0 \
 | sort -z \
 | xargs -0 md5sum > md5sum.txt
 
-echo "[2/3] Creating build directory..."
+echo "✓ md5sum.txt updated."
+
+##################################################
+# Create Build Directory
+##################################################
+
+echo
+echo "[2/4] Preparing build directory..."
 
 mkdir -p "$BUILD_DIR"
 
-echo "[3/3] Building ISO..."
+echo "✓ Build directory ready."
+
+##################################################
+# Build ISO
+##################################################
+
+echo
+echo "[3/4] Building ISO..."
 
 xorriso -as mkisofs \
 -r \
@@ -64,10 +95,17 @@ xorriso -as mkisofs \
 -isohybrid-gpt-basdat \
 "$ISO_DIR"
 
+echo "✓ ISO successfully created."
+
+##################################################
+# Finish
+##################################################
+
 echo
 echo "=========================================="
-echo " Build Complete!"
+echo "         Build Complete!"
 echo "=========================================="
 echo
-echo "ISO created at:"
+echo "ISO Location:"
 echo "$BUILD_DIR/PinPoint-Installer-v1.iso"
+echo

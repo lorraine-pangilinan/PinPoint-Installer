@@ -1,14 +1,23 @@
 #!/bin/bash
 
+##################################################
+# PinPoint - Package Installation Module
+##################################################
+
 set -e
 
-LOG="/var/log/pinpoint-install.log"
+echo
+echo "=========================================="
+echo " Installing PinPoint Dependencies"
+echo "=========================================="
+echo
 
-echo "======================================" | tee -a "$LOG"
-echo " PinPoint Phase 2 - Installing Packages" | tee -a "$LOG"
-echo "======================================" | tee -a "$LOG"
-
+echo "Updating package lists..."
 apt update
+
+echo
+echo "Installing required packages..."
+echo
 
 apt install -y \
 apache2 \
@@ -19,7 +28,6 @@ php-cli \
 php-common \
 php-mysql \
 php-xml \
-php-gd \
 php-curl \
 php-mbstring \
 php-zip \
@@ -37,9 +45,13 @@ apache2-utils \
 snmp \
 libnet-snmp-perl \
 gettext \
-bc \
-dnsutils \
-net-tools
+python3 \
+python3-pip \
+autoconf \
+libmcrypt-dev
 
 echo
-echo "Package installation completed." | tee -a "$LOG"
+echo "=========================================="
+echo " Package installation completed!"
+echo "=========================================="
+echo
