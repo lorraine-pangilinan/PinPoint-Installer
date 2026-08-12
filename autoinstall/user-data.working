@@ -6,7 +6,6 @@ autoinstall:
     - locale
     - keyboard
     - timezone
-    - storage
     - identity
 
   ssh:
@@ -19,8 +18,8 @@ autoinstall:
     - wget
     - git
 
- # package_update: true
- # package_upgrade: true
+  package_update: true
+  package_upgrade: true
 
   updates: security
 

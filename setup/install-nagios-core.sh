@@ -93,24 +93,24 @@ echo "✓ Compilation completed." | tee -a "$LOG"
 ########################################
 
 echo
-echo "[6/10] Installing Nagios..." | tee -a "$LOG"
-
-make install
-
-echo "✓ Nagios installed successfully." | tee -a "$LOG"
-
-########################################
-# [7/10] Install Nagios User & Groups
-########################################
-
-echo
-echo "[7/10] Creating Nagios user and group..." | tee -a "$LOG"
+echo "[6/10] Creating Nagios user and group..." | tee -a "$LOG"
 
 make install-groups-users
 
 usermod -a -G nagios www-data
 
 echo "✓ Nagios users created." | tee -a "$LOG"
+
+########################################
+# [7/10] Install Nagios User & Groups
+########################################
+
+echo
+echo "[7/10] Installing Nagios Core..." | tee -a "$LOG"
+
+make install
+
+echo "✓ Nagios installed successfully.." | tee -a "$LOG"
 
 ########################################
 # [8/10] Install Service Files

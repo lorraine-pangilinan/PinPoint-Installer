@@ -54,7 +54,11 @@ cd "$ISO_DIR"
 
 rm -f md5sum.txt
 
-find . -type f ! -name "md5sum.txt" -print0 \
+find . -type f \
+    ! -name "md5sum.txt" \
+    ! -name "boot.catalog" \
+    ! -path "./boot/grub/i386-pc/eltorito.img" \
+    -print0 \
 | sort -z \
 | xargs -0 md5sum > md5sum.txt
 
