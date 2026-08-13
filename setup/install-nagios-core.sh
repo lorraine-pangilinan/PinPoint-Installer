@@ -10,39 +10,40 @@ set -e
 
 LOG="/var/log/pinpoint-nagios.log"
 
-########################################
+##################################################
 # Root Check
-########################################
+##################################################
 
 if [ "$EUID" -ne 0 ]; then
     echo "ERROR: This script must be run as root."
     exit 1
 fi
 
-########################################
+##################################################
 # Header
-########################################
+##################################################
 
 echo "======================================" | tee -a "$LOG"
 echo " PinPoint - Installing Nagios Core" | tee -a "$LOG"
 echo " Started: $(date)" | tee -a "$LOG"
 echo "======================================" | tee -a "$LOG"
 
-########################################
-# [1/10] Prepare Source Directory
-########################################
+##################################################
+# [1/8] Prepare Source Directory
+##################################################
 
 echo
-echo "[1/10] Preparing source directory..." | tee -a "$LOG"
+echo "[1/8] Preparing source directory..." | tee -a "$LOG"
 
+mkdir -p /usr/local/src
 cd /usr/local/src
 
-########################################
-# [2/10] Download Nagios Core
-########################################
+##################################################
+# [2/8] Download Nagios Core
+##################################################
 
 echo
-echo "[2/10] Downloading Nagios Core..." | tee -a "$LOG"
+echo "[2/8] Downloading Nagios Core..." | tee -a "$LOG"
 
 if [ ! -f nagios-4.5.11.tar.gz ]; then
     wget https://assets.nagios.com/downloads/nagioscore/releases/nagios-4.5.11.tar.gz
@@ -50,120 +51,96 @@ else
     echo "✓ Nagios archive already exists." | tee -a "$LOG"
 fi
 
-########################################
-# [3/10] Extract Nagios
-########################################
+##################################################
+# [3/8] Extract Nagios Core
+##################################################
 
 echo
-echo "[3/10] Extracting Nagios Core..." | tee -a "$LOG"
+echo "[3/8] Extracting Nagios Core..." | tee -a "$LOG"
 
 rm -rf nagios-4.5.11
-
 tar -xzf nagios-4.5.11.tar.gz
 
 cd nagios-4.5.11
 
 echo "✓ Source extracted successfully." | tee -a "$LOG"
 
-########################################
-# [4/10] Configure Nagios
-########################################
+##################################################
+# [4/8] Configure Nagios
+##################################################
 
 echo
-echo "[4/10] Configuring Nagios..." | tee -a "$LOG"
+echo "[4/8] Configuring Nagios..." | tee -a "$LOG"
 
 ./configure \
     --with-httpd-conf=/etc/apache2/sites-enabled
 
 echo "✓ Configure completed." | tee -a "$LOG"
 
-########################################
-# [5/10] Compile Nagios
-########################################
+##################################################
+# [5/8] Compile Nagios
+##################################################
 
 echo
-echo "[5/10] Compiling Nagios..." | tee -a "$LOG"
+echo "[5/8] Compiling Nagios..." | tee -a "$LOG"
 
 make all
 
 echo "✓ Compilation completed." | tee -a "$LOG"
 
-########################################
-# [6/10] Install Nagios
-########################################
+##################################################
+# [6/8] Create Nagios User and Groups
+##################################################
 
 echo
-echo "[6/10] Creating Nagios user and group..." | tee -a "$LOG"
+echo "[6/8] Creating Nagios user and group..." | tee -a "$LOG"
 
 make install-groups-users
 
 usermod -a -G nagios www-data
 
-echo "✓ Nagios users created." | tee -a "$LOG"
+echo "✓ Nagios user and group created." | tee -a "$LOG"
+echo "✓ www-data added to nagios group." | tee -a "$LOG"
 
-########################################
-# [7/10] Install Nagios User & Groups
-########################################
+##################################################
+# [7/8] Install Nagios Core and Service
+##################################################
 
 echo
-echo "[7/10] Installing Nagios Core..." | tee -a "$LOG"
+echo "[7/8] Installing Nagios Core and service..." | tee -a "$LOG"
 
 make install
-
-echo "✓ Nagios installed successfully.." | tee -a "$LOG"
-
-########################################
-# [8/10] Install Service Files
-########################################
-
-echo
-echo "[8/10] Installing Nagios service..." | tee -a "$LOG"
-
 make install-daemoninit
-
 make install-commandmode
 
-echo "✓ Service installed." | tee -a "$LOG"
+echo "✓ Nagios Core installed." | tee -a "$LOG"
+echo "✓ Nagios service installed." | tee -a "$LOG"
+echo "✓ Nagios command mode installed." | tee -a "$LOG"
 
-########################################
-# [9/10] Install Configuration
-########################################
-
-echo
-echo "[9/10] Installing Nagios configuration..." | tee -a "$LOG"
-
-make install-config
-
-make install-webconf
-
-echo "✓ Configuration installed." | tee -a "$LOG"
-
-########################################
-# [10/10] Enable and Verify
-########################################
+##################################################
+# [8/8] Verify Nagios Core
+##################################################
 
 echo
-echo "[10/10] Enabling Nagios service..." | tee -a "$LOG"
+echo "[8/8] Verifying Nagios Core..." | tee -a "$LOG"
 
-a2enmod cgi
+if [ ! -x /usr/local/nagios/bin/nagios ]; then
+    echo "ERROR: Nagios binary was not installed." | tee -a "$LOG"
+    exit 1
+fi
 
-systemctl enable nagios
+/usr/local/nagios/bin/nagios -V | tee -a "$LOG"
 
-systemctl restart apache2
+echo "✓ Nagios Core verified." | tee -a "$LOG"
 
-systemctl start nagios
-
-echo
-echo "Verifying Nagios..." | tee -a "$LOG"
-
-systemctl is-active --quiet nagios
-
-echo "✓ Nagios is running." | tee -a "$LOG"
+##################################################
+# Footer
+##################################################
 
 echo
 echo "======================================" | tee -a "$LOG"
-echo "Nagios Core installation completed." | tee -a "$LOG"
-echo "Finished: $(date)" | tee -a "$LOG"
+echo " Nagios Core installation completed." | tee -a "$LOG"
+echo " Finished: $(date)" | tee -a "$LOG"
 echo "======================================" | tee -a "$LOG"
 
 exit 0
