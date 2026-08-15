@@ -28,12 +28,11 @@ echo "[5/5] Configuring Nagios..." | tee -a "$LOG"
 echo "PinPoint installation completed successfully." | tee -a "$LOG"
 
 echo "Creating initial web authentication setup marker..." | tee -a "$LOG"
-
-mkdir -p /var/lib/pinpoint
-touch /var/lib/pinpoint/web-auth-pending
-chmod 644 /var/lib/pinpoint/web-auth-pending
+touch /root/.pinpoint-web-auth-pending
+chmod 600 /root/.pinpoint-web-auth-pending
 
 echo "✓ Initial web authentication setup is pending." | tee -a "$LOG"
+
 echo "Disabling PinPoint First Boot service..." | tee -a "$LOG"
 systemctl disable pinpoint-firstboot.service
 
