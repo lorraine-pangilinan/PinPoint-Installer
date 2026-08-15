@@ -69,52 +69,11 @@ a2enmod cgi
 echo "✓ Apache configuration installed." | tee -a "$LOG"
 
 ##################################################
-# [4/7] Configure Nagios Web Authentication
+# [4/7] Validate Nagios Configuration
 ##################################################
 
 echo
-echo "[4/7] Configuring Nagios web authentication..." | tee -a "$LOG"
-
-HTPASSWD="/usr/local/nagios/etc/htpasswd.users"
-CREDENTIALS="/root/pinpoint-nagios-web-credentials"
-
-if [ ! -f "$HTPASSWD" ]; then
-
-    # Generate a random password
-    NAGIOS_WEB_PASSWORD="$(openssl rand -base64 24)"
-
-    # Create Nagios web user
-    htpasswd -b -c "$HTPASSWD" nagiosadmin "$NAGIOS_WEB_PASSWORD"
-
-    # Allow Apache to read the authentication file
-    chown root:www-data "$HTPASSWD"
-    chmod 640 "$HTPASSWD"
-
-    # Store the initial credentials securely for the administrator
-    cat > "$CREDENTIALS" <<EOF
-Nagios Web Username: nagiosadmin
-Nagios Web Password: $NAGIOS_WEB_PASSWORD
-EOF
-
-    chmod 600 "$CREDENTIALS"
-
-    echo "✓ Nagios web authentication configured." | tee -a "$LOG"
-    echo "✓ Nagios web username: nagiosadmin" | tee -a "$LOG"
-    echo "✓ Initial Nagios web credentials saved to:" | tee -a "$LOG"
-    echo "  $CREDENTIALS" | tee -a "$LOG"
-
-else
-
-    echo "✓ Nagios web authentication already exists." | tee -a "$LOG"
-
-fi
-
-##################################################
-# [5/7] Validate Nagios Configuration
-##################################################
-
-echo
-echo "[5/7] Validating Nagios configuration..." | tee -a "$LOG"
+echo "[4/7] Validating Nagios configuration..." | tee -a "$LOG"
 
 if /usr/local/nagios/bin/nagios \
     -v /usr/local/nagios/etc/nagios.cfg \
@@ -131,11 +90,11 @@ else
 fi
 
 ##################################################
-# [6/7] Enable and Restart Services
+# [5/7] Enable and Restart Services
 ##################################################
 
 echo
-echo "[6/7] Enabling and restarting services..." | tee -a "$LOG"
+echo "[5/7] Enabling and restarting services..." | tee -a "$LOG"
 
 systemctl enable apache2
 systemctl enable nagios
@@ -147,11 +106,11 @@ systemctl restart nagios
 echo "✓ Nagios restarted." | tee -a "$LOG"
 
 ##################################################
-# [7/7] Verify Services and Web Interface
+# [6/7] Verify Services and Web Interface
 ##################################################
 
 echo
-echo "[7/7] Verifying services and web interface..." | tee -a "$LOG"
+echo "[6/7] Verifying services and web interface..." | tee -a "$LOG"
 
 if systemctl is-active --quiet apache2; then
     echo "✓ Apache is running." | tee -a "$LOG"
