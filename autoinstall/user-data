@@ -6,6 +6,7 @@ autoinstall:
     - locale
     - keyboard
     - timezone
+    - network
     - storage
     - identity
 
