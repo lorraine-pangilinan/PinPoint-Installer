@@ -58,7 +58,15 @@ done
 echo
 echo "Creating Nagios web authentication..."
 
-printf '%s\n' "$WEB_PASSWORD" | htpasswd -c -i "$HTPASSWD" "$WEB_USERNAME"
+# Only create a new file if none exists, so the
+# pinpoint-api account is kept.
+if [ -f "$HTPASSWD" ]; then
+    HTPASSWD_CREATE=""
+else
+    HTPASSWD_CREATE="-c"
+fi
+
+printf '%s\n' "$WEB_PASSWORD" | htpasswd $HTPASSWD_CREATE -i "$HTPASSWD" "$WEB_USERNAME"
 
 chown root:www-data "$HTPASSWD"
 chmod 640 "$HTPASSWD"
