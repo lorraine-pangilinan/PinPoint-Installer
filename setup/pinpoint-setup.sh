@@ -41,7 +41,7 @@ echo "  - PHP"
 echo "  - Nagios Core"
 echo "  - Nagios Plugins"
 echo "  - SNMP"
-echo "  - PinPoint Web Interface"
+echo "  - PinPoint Web Interface (Nginx + Gunicorn)"
 echo
 
 echo "------------------------------------------"
@@ -70,6 +70,7 @@ case "$OPTION" in
         "install-nagios-plugins.sh"
         "configure-snmp.sh"
         "configure-nagios.sh"
+        "deploy-pinpoint-web.sh"
     )
 
     TOTAL=${#MODULES[@]}

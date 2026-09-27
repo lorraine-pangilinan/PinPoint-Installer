@@ -1,56 +1,42 @@
 #!/bin/bash
 
-MARKER="/var/lib/pinpoint/web-auth-pending"
-AUTH_SCRIPT="/usr/local/bin/pinpoint-web-auth"
+# Sourced from /etc/profile.d, so use "return" rather than
+# "exit": exit would end the login shell itself.
+
+MARKER="/var/lib/pinpoint/web-credentials-pending"
+CREDENTIALS_SCRIPT="/usr/local/bin/pinpoint-web-credentials"
 
 # Only run for interactive shells
 case "$-" in
     *i*) ;;
-    *) exit 0 ;;
+    *) return 0 2>/dev/null || exit 0 ;;
 esac
 
-# Initial web authentication already completed
+# Credentials already recorded and removed
 if [ ! -f "$MARKER" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
-# Authentication script is not available
-if [ ! -x "$AUTH_SCRIPT" ]; then
+# Credentials script is not available
+if [ ! -x "$CREDENTIALS_SCRIPT" ]; then
     echo
-    echo "WARNING: PinPoint web authentication setup is unavailable."
-    echo "Expected: $AUTH_SCRIPT"
+    echo "WARNING: PinPoint credentials viewer is unavailable."
+    echo "Expected: $CREDENTIALS_SCRIPT"
     echo
     return 0 2>/dev/null || exit 0
 fi
 
 echo
 echo "=========================================="
-echo " PinPoint Initial Web Authentication"
+echo " PinPoint Installation Complete"
 echo "=========================================="
 echo
-echo "PinPoint installation is complete."
-echo "Please create the temporary credentials"
-echo "for the Nagios Web Interface."
-echo
+echo "The PinPoint web administrator account"
+echo "was generated during installation."
 
-sudo "$AUTH_SCRIPT"
+sudo "$CREDENTIALS_SCRIPT"
 
-RESULT=$?
-
-if [ "$RESULT" -eq 0 ] && [ ! -f "$MARKER" ]; then
-    echo
-    echo "=========================================="
-    echo " Initial Web Setup Complete"
-    echo "=========================================="
-    echo
-    echo "Nagios Web Interface:"
-    echo "http://$(hostname -I | awk '{print $1}')/nagios/"
-    echo
+if [ ! -f "$MARKER" ]; then
     read -rp "Press Enter to continue to the shell..."
-    echo
-else
-    echo
-    echo "Web authentication setup was not completed."
-    echo "It will be offered again at the next login."
     echo
 fi

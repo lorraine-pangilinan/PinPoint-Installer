@@ -32,8 +32,8 @@ autoinstall:
     - cp /target/root/pinpoint/pinpoint-firstboot.sh /target/usr/local/bin/
     - curtin in-target -- chmod +x /usr/local/bin/pinpoint-firstboot.sh
 
-    - cp /target/root/pinpoint/setup-web-auth.sh /target/usr/local/bin/pinpoint-web-auth
-    - curtin in-target -- chmod +x /usr/local/bin/pinpoint-web-auth
+    - cp /target/root/pinpoint/pinpoint-web-credentials.sh /target/usr/local/bin/pinpoint-web-credentials
+    - curtin in-target -- chmod 755 /usr/local/bin/pinpoint-web-credentials
 
     - cp /target/root/pinpoint/pinpoint-login-hook.sh /target/etc/profile.d/pinpoint-login-hook.sh
     - curtin in-target -- chmod 644 /etc/profile.d/pinpoint-login-hook.sh
