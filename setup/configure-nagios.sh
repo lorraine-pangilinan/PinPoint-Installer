@@ -99,6 +99,10 @@ EOF
 
 a2dissite 000-default
 
+# Silence the AH00558 "could not determine ServerName" warning.
+echo "ServerName localhost" > /etc/apache2/conf-available/servername.conf
+a2enconf servername
+
 echo "✓ Apache configuration installed." | tee -a "$LOG"
 echo "✓ Apache bound to $NAGIOS_BIND." | tee -a "$LOG"
 
@@ -249,13 +253,15 @@ else
     exit 1
 fi
 
-if ss -ltnH 'sport = :80' | grep -q .; then
-    echo "ERROR: Port 80 is still in use. It must be free for Nginx." | tee -a "$LOG"
+# Nginx may already own port 80 when this module is re-run;
+# only Apache holding it is an error.
+if ss -ltnpH 'sport = :80' | grep -q '"apache2"'; then
+    echo "ERROR: Apache is still using port 80. It must be free for Nginx." | tee -a "$LOG"
     ss -ltnp 'sport = :80' >> "$LOG" 2>&1 || true
     exit 1
 fi
 
-echo "✓ Port 80 is free for Nginx." | tee -a "$LOG"
+echo "✓ Apache is not using port 80." | tee -a "$LOG"
 
 HTTP_STATUS="$(curl -s -o /dev/null -w "%{http_code}" "$NAGIOS_URL/" || true)"
 
