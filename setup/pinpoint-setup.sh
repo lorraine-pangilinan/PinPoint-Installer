@@ -71,6 +71,7 @@ case "$OPTION" in
         "configure-snmp.sh"
         "configure-nagios.sh"
         "deploy-pinpoint-web.sh"
+        "configure-pinpoint-privileges.sh"
     )
 
     TOTAL=${#MODULES[@]}
