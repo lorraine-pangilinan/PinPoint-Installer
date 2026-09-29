@@ -21,6 +21,10 @@ NAGIOS_URL="http://$NAGIOS_BIND/nagios"
 HTPASSWD="/usr/local/nagios/etc/htpasswd.users"
 CGI_CFG="/usr/local/nagios/etc/cgi.cfg"
 
+NAGIOS_CFG="/usr/local/nagios/etc/nagios.cfg"
+NAGIOS_OBJECTS="/usr/local/nagios/etc/objects"
+NAGIOS_HOST_CFG="$NAGIOS_OBJECTS/hosts.cfg"
+
 API_USER="pinpoint-api"
 PINPOINT_ETC="/etc/pinpoint"
 API_CREDENTIALS="$PINPOINT_ETC/nagios-api.env"
@@ -69,6 +73,47 @@ cd /usr/local/src/nagios-4.5.11
 make install-config
 
 echo "✓ Nagios configuration installed." | tee -a "$LOG"
+
+# PinPoint Network Discovery writes the hosts it finds to
+# hosts.cfg, and only validates it if nagios.cfg loads it.
+# configure-pinpoint-privileges.sh later hands the file to
+# the pinpoint account, so ownership is set only on creation.
+if [ ! -f "$NAGIOS_HOST_CFG" ]; then
+    echo "# Managed by the PinPoint web interface." > "$NAGIOS_HOST_CFG"
+    chown nagios:nagios "$NAGIOS_HOST_CFG"
+    chmod 664 "$NAGIOS_HOST_CFG"
+fi
+
+HOST_CFG_BLOCK="# PinPoint: hosts found by Network Discovery. The PinPoint web
+# interface generates and replaces this file; do not edit it by hand.
+cfg_file=$NAGIOS_HOST_CFG"
+
+if ! grep -qx "cfg_file=$NAGIOS_HOST_CFG" "$NAGIOS_CFG"; then
+
+    if grep -qx "cfg_file=$NAGIOS_OBJECTS/localhost.cfg" "$NAGIOS_CFG"; then
+
+        # Keep it with the other object files, below localhost.cfg.
+        BLOCK="$HOST_CFG_BLOCK" AFTER="cfg_file=$NAGIOS_OBJECTS/localhost.cfg" awk '
+            { print }
+            $0 == ENVIRON["AFTER"] { print ""; print ENVIRON["BLOCK"] }
+        ' "$NAGIOS_CFG" > "$NAGIOS_CFG.tmp"
+
+        # cat keeps the owner and mode of nagios.cfg.
+        cat "$NAGIOS_CFG.tmp" > "$NAGIOS_CFG"
+        rm -f "$NAGIOS_CFG.tmp"
+
+    else
+        printf '\n%s\n' "$HOST_CFG_BLOCK" >> "$NAGIOS_CFG"
+    fi
+
+fi
+
+if ! grep -qx "cfg_file=$NAGIOS_HOST_CFG" "$NAGIOS_CFG"; then
+    echo "ERROR: Could not add hosts.cfg to nagios.cfg." | tee -a "$LOG"
+    exit 1
+fi
+
+echo "✓ nagios.cfg loads $NAGIOS_HOST_CFG." | tee -a "$LOG"
 
 ##################################################
 # [3/8] Install Apache Configuration
