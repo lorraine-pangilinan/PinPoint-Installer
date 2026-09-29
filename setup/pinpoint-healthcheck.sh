@@ -7,6 +7,9 @@
 #          PinPoint server:
 #            - Nagios Core + Apache (127.0.0.1:8081)
 #            - Gunicorn (127.0.0.1:8000)
+#            - Database migrations
+#            - Nagios config access (Discovery,
+#              Plugin Manager) and NCPA key
 #            - Nginx (:80)
 #            - nmap capabilities (Discovery)
 #
@@ -47,6 +50,11 @@ NMAP_WRAPPER="/usr/local/bin/nmap-sudo"
 NMAP_CAPS_HELPER="/usr/local/sbin/pinpoint-nmap-caps"
 APT_HOOK="/etc/apt/apt.conf.d/80pinpoint-nmap-caps"
 GUNICORN_DROPIN="/etc/systemd/system/$GUNICORN_SERVICE.service.d/nmap-capabilities.conf"
+
+NAGIOS_GROUP="nagios"
+NAGIOS_HOST_CFG="/usr/local/nagios/etc/objects/hosts.cfg"
+PLUGIN_SERVICE_CFG="/usr/local/nagios/etc/objects/plugin-services.cfg"
+NCPA_KEY="$APP_ROOT/.ssh/pinpoint_ncpa_deploy"
 
 # status.dat is rewritten every 10 seconds by default.
 STATUS_MAX_AGE=120
@@ -94,6 +102,19 @@ check_service() {
 # Local addresses listening on a TCP port, one per line.
 listeners() {
     ss -ltnH "sport = :$1" | awk '{print $4}' | sort -u
+}
+
+# Run Python (from stdin) in the application environment
+# as the service account, without starting the scheduler.
+run_app_python() {
+    runuser -u "$APP_USER" -- bash -c "
+        set -a
+        . '$APP_ENV'
+        set +a
+        export FLASK_DEBUG=1 PINPOINT_SCHEDULER=0
+        cd '$SERVER_DIR'
+        exec '$VENV_DIR/bin/python' -
+    "
 }
 
 ##################################################
@@ -312,10 +333,24 @@ else
     fail "Gunicorn has $WORKERS worker(s) (expected 1)."
 fi
 
+if systemctl show -p Environment --value "$GUNICORN_SERVICE" | grep -qw 'PINPOINT_SCHEDULER=1'; then
+    pass "Background scheduler enabled for $GUNICORN_SERVICE."
+else
+    fail "$GUNICORN_SERVICE does not set PINPOINT_SCHEDULER=1."
+fi
+
 if [ "$(stat -c '%U:%G %a' "$APP_ENV" 2> /dev/null)" = "root:$APP_USER 640" ]; then
     pass "$APP_ENV permissions are root:$APP_USER 640."
 else
     fail "$APP_ENV permissions are $(stat -c '%U:%G %a' "$APP_ENV" 2> /dev/null || echo missing)."
+fi
+
+NETWORKS_VALUE="$(sed -n 's/^PINPOINT_NETWORKS=//p' "$APP_ENV" 2> /dev/null)"
+
+if [ -n "$NETWORKS_VALUE" ]; then
+    pass "Discovery range: $NETWORKS_VALUE."
+else
+    warn "PINPOINT_NETWORKS not set in $APP_ENV. Re-run deploy-pinpoint-web.sh."
 fi
 
 for DB_FILE in system.db history.db; do
@@ -326,6 +361,49 @@ for DB_FILE in system.db history.db; do
     fi
 done
 
+if [ -f "$SERVER_DIR/migrations/env.py" ]; then
+
+    MIGRATION_RESULT="$(run_app_python 2>&1 <<'EOF'
+import sqlite3
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+
+cfg = Config()
+cfg.set_main_option("script_location", "migrations")
+heads = set(ScriptDirectory.from_config(cfg).get_heads())
+
+for name in ("system.db", "history.db"):
+    con = sqlite3.connect(f"file:{name}?mode=ro", uri=True)
+    try:
+        has_table = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
+        ).fetchone()
+        if not has_table:
+            if name == "system.db":
+                raise SystemExit("system.db has no migration revision")
+            continue
+        current = {row[0] for row in con.execute("SELECT version_num FROM alembic_version")}
+    finally:
+        con.close()
+
+    if current != heads:
+        raise SystemExit(f"{name} is at {sorted(current)}, expected {sorted(heads)}")
+
+print(", ".join(sorted(heads)))
+EOF
+)"
+
+    if [ $? -eq 0 ]; then
+        pass "Database schema at latest migration ($MIGRATION_RESULT)."
+    else
+        fail "Database schema out of date: $(printf '%s' "$MIGRATION_RESULT" | tail -1). Re-run deploy-pinpoint-web.sh."
+    fi
+
+else
+    warn "Application has no migrations; database upgrades are not possible."
+fi
+
 CODE="$(http_code "http://$GUNICORN_BIND/api/user/login")"
 
 case "$CODE" in
@@ -335,14 +413,7 @@ esac
 
 # Same check deploy-pinpoint-web.sh runs: the app's own
 # config and credentials must reach Nagios.
-runuser -u "$APP_USER" -- bash -c "
-    set -a
-    . '$APP_ENV'
-    set +a
-    export FLASK_DEBUG=1
-    cd '$SERVER_DIR'
-    exec '$VENV_DIR/bin/python' -
-" > /dev/null 2>&1 <<'EOF'
+run_app_python > /dev/null 2>&1 <<'EOF'
 import requests
 
 from config import Config
@@ -371,6 +442,56 @@ if [ "$TRACEBACKS" = "0" ]; then
     pass "No Python tracebacks in the last hour."
 else
     warn "$TRACEBACKS Python traceback(s) in the last hour (journalctl -u $GUNICORN_SERVICE)."
+fi
+
+##################################################
+# Nagios Config Access (Discovery, Plugin Manager)
+##################################################
+
+section "Nagios Config Access"
+
+if id -nG "$APP_USER" 2> /dev/null | grep -qw "$NAGIOS_GROUP"; then
+    pass "$APP_USER is in the $NAGIOS_GROUP group."
+else
+    fail "$APP_USER is not in the $NAGIOS_GROUP group."
+fi
+
+for CFG in "$NAGIOS_HOST_CFG" "$PLUGIN_SERVICE_CFG"; do
+
+    if [ "$(stat -c '%U:%G %a' "$CFG" 2> /dev/null)" = "$APP_USER:$NAGIOS_GROUP 664" ]; then
+        pass "$(basename "$CFG") is $APP_USER:$NAGIOS_GROUP 664."
+    else
+        fail "$CFG is $(stat -c '%U:%G %a' "$CFG" 2> /dev/null || echo missing) (expected $APP_USER:$NAGIOS_GROUP 664)."
+    fi
+
+    if grep -qx "cfg_file=$CFG" "$NAGIOS_CFG"; then
+        pass "nagios.cfg loads $(basename "$CFG")."
+    else
+        fail "nagios.cfg does not load $CFG."
+    fi
+
+done
+
+if runuser -u "$APP_USER" -- "$NAGIOS_BIN" -v "$NAGIOS_CFG" > /dev/null 2>&1; then
+    pass "$APP_USER can validate the Nagios configuration."
+else
+    fail "$APP_USER cannot run $NAGIOS_BIN -v."
+fi
+
+if runuser -u "$APP_USER" -- sudo -n -l /usr/bin/systemctl reload nagios > /dev/null 2>&1; then
+    pass "$APP_USER can reload Nagios through sudo."
+else
+    fail "$APP_USER cannot run 'sudo systemctl reload nagios'."
+fi
+
+if runuser -u "$APP_USER" -- sudo -n -l /usr/bin/systemctl restart nagios > /dev/null 2>&1; then
+    fail "$APP_USER has sudo rights beyond 'systemctl reload nagios'."
+fi
+
+if runuser -u "$APP_USER" -- test -r "$NCPA_KEY"; then
+    pass "NCPA deployment key present."
+else
+    fail "$NCPA_KEY missing or unreadable by $APP_USER."
 fi
 
 ##################################################
