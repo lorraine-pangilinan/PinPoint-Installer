@@ -42,6 +42,7 @@ libgd-dev \
 openssl \
 libssl-dev \
 libmariadb-dev \
+libmariadb-dev-compat \
 apache2-utils \
 snmp \
 libnet-snmp-perl \

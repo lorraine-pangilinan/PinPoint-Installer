@@ -86,7 +86,10 @@ echo "[4/8] Configuring plugins..." | tee -a "$LOG"
 
 ./configure \
     --with-nagios-user=nagios \
-    --with-nagios-group=nagios
+    --with-nagios-group=nagios \
+    --with-mysql=/usr
+
+grep -i "mysql" config.log | grep -i "checking\|result" | tail -n 5 | tee -a "$LOG" || true
 
 echo "✓ Configure completed." | tee -a "$LOG"
 
