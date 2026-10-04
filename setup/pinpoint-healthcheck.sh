@@ -177,7 +177,7 @@ else
     warn "External command pipe $NAGIOS_CMD not found."
 fi
 
-for PLUGIN in check_ping check_http check_snmp; do
+for PLUGIN in check_ping check_http check_snmp check_mysql check_ncpa.py; do
     if [ -x "$NAGIOS_LIBEXEC/$PLUGIN" ]; then
         pass "Plugin $PLUGIN installed."
     else

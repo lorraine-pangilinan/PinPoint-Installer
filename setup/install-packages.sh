@@ -41,6 +41,7 @@ build-essential \
 libgd-dev \
 openssl \
 libssl-dev \
+libmariadb-dev \
 apache2-utils \
 snmp \
 libnet-snmp-perl \
