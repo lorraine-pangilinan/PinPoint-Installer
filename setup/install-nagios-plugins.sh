@@ -140,6 +140,19 @@ fi
 
 install -o nagios -g nagios -m 0755 "$NCPA_PLUGIN" "$LIBEXEC/check_ncpa.py"
 
+# Ubuntu 22.04 has python3 but no "python" command, so the
+# upstream "#!/usr/bin/env python" line makes Nagios fail
+# with return code 127. Point it at python3 (only when line 1
+# names python without a 3).
+if head -n 1 "$LIBEXEC/check_ncpa.py" \
+    | grep -Eq '^#!.*[[:space:]/]python[[:space:]]*$'; then
+    sed -i '1s/python[[:space:]]*$/python3/' "$LIBEXEC/check_ncpa.py"
+    echo "  Interpreter line changed to python3." | tee -a "$LOG"
+fi
+
+chown nagios:nagios "$LIBEXEC/check_ncpa.py"
+chmod 0755 "$LIBEXEC/check_ncpa.py"
+
 echo "✓ check_ncpa.py installed." | tee -a "$LOG"
 
 ########################################
@@ -164,10 +177,66 @@ else
     exit 1
 fi
 
-if python3 "$LIBEXEC/check_ncpa.py" --help >/dev/null 2>&1; then
+# Run the plugin exactly as Nagios does: directly, as the
+# nagios user, so the "#!" line is used. (Running it through
+# "python3 check_ncpa.py" would skip that line and hide errors.)
+set +e
+runuser -u nagios -- "$LIBEXEC/check_ncpa.py" --help >/dev/null 2>&1
+NCPA_RC=$?
+set -e
+
+if [ "$NCPA_RC" -eq 0 ]; then
     echo "✓ check_ncpa.py verified." | tee -a "$LOG"
 else
-    echo "✗ check_ncpa.py failed to run." | tee -a "$LOG"
+    NCPA_SHEBANG="$(head -n 1 "$LIBEXEC/check_ncpa.py")"
+    echo "✗ check_ncpa.py failed to run as nagios (exit code $NCPA_RC)." | tee -a "$LOG"
+    echo "  Interpreter line: $NCPA_SHEBANG" | tee -a "$LOG"
+
+    if [ "$NCPA_RC" -eq 127 ]; then
+        echo "  127 = the interpreter named above is not installed." | tee -a "$LOG"
+    elif [ "$NCPA_RC" -eq 126 ]; then
+        echo "  126 = permission problem running the plugin." | tee -a "$LOG"
+    fi
+
+    exit 1
+fi
+
+# Check every script plugin's interpreter, using the nagios
+# user's environment, and report all failures together.
+BAD_INTERPRETERS=0
+
+for FILE in "$LIBEXEC"/*; do
+    [ -f "$FILE" ] || continue
+    [ "$(head -c 2 "$FILE" 2>/dev/null)" = "#!" ] || continue
+
+    SHEBANG="$(head -n 1 "$FILE" | tr -d '\r')"
+    read -r -a PARTS <<< "${SHEBANG#\#!}"
+    INTERP="${PARTS[0]:-}"
+
+    if [ "$(basename "$INTERP")" = "env" ]; then
+        INTERP=""
+        for WORD in "${PARTS[@]:1}"; do
+            case "$WORD" in
+                -*|*=*) continue ;;
+            esac
+            INTERP="$WORD"
+            break
+        done
+    fi
+
+    if [ -z "$INTERP" ]; then
+        echo "✗ $(basename "$FILE"): cannot read interpreter from '$SHEBANG'." | tee -a "$LOG"
+        BAD_INTERPRETERS=$((BAD_INTERPRETERS + 1))
+    elif ! runuser -u nagios -- bash -c 'command -v "$1" >/dev/null 2>&1' _ "$INTERP"; then
+        echo "✗ $(basename "$FILE"): interpreter '$INTERP' not found (line 1: $SHEBANG)." | tee -a "$LOG"
+        BAD_INTERPRETERS=$((BAD_INTERPRETERS + 1))
+    fi
+done
+
+if [ "$BAD_INTERPRETERS" -eq 0 ]; then
+    echo "✓ Plugin interpreters verified." | tee -a "$LOG"
+else
+    echo "✗ $BAD_INTERPRETERS plugin(s) have a missing interpreter." | tee -a "$LOG"
     exit 1
 fi
 

@@ -185,6 +185,28 @@ for PLUGIN in check_ping check_http check_snmp check_mysql check_ncpa.py; do
     fi
 done
 
+# Execute check_ncpa.py the way Nagios does (directly, as the
+# nagios user). A file that exists and is executable can still
+# fail with 127 when its "#!" interpreter is missing.
+if [ -x "$NAGIOS_LIBEXEC/check_ncpa.py" ]; then
+    runuser -u nagios -- "$NAGIOS_LIBEXEC/check_ncpa.py" --help > /dev/null 2>&1
+    NCPA_RC=$?
+
+    if [ "$NCPA_RC" -eq 0 ]; then
+        pass "check_ncpa.py runs as nagios."
+    else
+        NCPA_SHEBANG="$(head -n 1 "$NAGIOS_LIBEXEC/check_ncpa.py")"
+
+        if [ "$NCPA_RC" -eq 127 ]; then
+            fail "check_ncpa.py: interpreter missing (exit 127, line 1: $NCPA_SHEBANG)."
+        elif [ "$NCPA_RC" -eq 126 ]; then
+            fail "check_ncpa.py: permission problem (exit 126)."
+        else
+            fail "check_ncpa.py failed to run as nagios (exit $NCPA_RC, line 1: $NCPA_SHEBANG)."
+        fi
+    fi
+fi
+
 ##################################################
 # Apache (Nagios web / CGIs)
 ##################################################
