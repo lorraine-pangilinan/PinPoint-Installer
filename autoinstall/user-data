@@ -10,6 +10,11 @@ autoinstall:
     - storage
     - identity
 
+  apt:
+    primary:
+      - arches: [default]
+        uri: http://ph.archive.ubuntu.com/ubuntu/
+
   ssh:
     install-server: true
     allow-pw: true
