@@ -133,6 +133,7 @@ flask init-production --admin-email admin-7f3a2@pinpoint.lan --password-stdin
 
 Requirements:
 
+- Creates the administrator with `Needs_Setup=True`, so the first sign-in goes through first-run setup (`POST /api/user/complete-setup`): a real email and a new password. The installer checks this before and after creating the admin and stops with an error if the application has no first-run setup.
 - Seeds permissions, roles and system settings. Creates **no** test users.
 - Reads the password from stdin, never from an argument (arguments show up in `ps` and shell history).
 - Hashes the password with `User.set_password`.
@@ -215,6 +216,7 @@ Also confirm the supported Python version. The README says 3.14.2 and the instal
 - [ ] No lab IP, subnet, password or secret key is required from source code in production.
 - [ ] `server/migrations/` is committed, and `flask db upgrade` builds both `system.db` and `history.db` from empty.
 - [ ] `flask init-production` creates one administrator and no test users.
+- [ ] `flask init-production` sets `Needs_Setup` on that administrator.
 - [ ] Importing `app` does not start the scheduler unless `PINPOINT_SCHEDULER=1`.
 - [ ] `reset_db.sh` has no user-specific paths.
 - [ ] Cookie files and lab host configs are no longer tracked.
@@ -229,7 +231,7 @@ PinPoint-Installer is ready for these changes and still works with `main` as it 
 |---|---|---|
 | `NAGIOS_PORT` in `config.py` | writes `NAGIOS_HOST=127.0.0.1` and `NAGIOS_PORT=8081` | writes `NAGIOS_HOST=127.0.0.1:8081` |
 | `server/migrations/env.py` | runs `flask db upgrade` and checks both databases are at the latest revision | runs `db.create_all()` |
-| a `flask init-production` command | pipes the generated password to it | imports the seed functions directly |
+| `User.Needs_Setup` (first-run setup) | pipes the generated password to `flask init-production` | stops a new installation with an error (existing installs are unaffected) |
 
 In every case it:
 

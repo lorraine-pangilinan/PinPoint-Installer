@@ -21,9 +21,14 @@
 #
 # Works with Network-Diagnosis-System before and
 # after the changes in docs/Network-Diagnosis-
-# System-Installer-Integration.md: each feature
-# (NAGIOS_PORT, migrations, init-production) is
-# used only when the cloned application has it.
+# System-Installer-Integration.md: NAGIOS_PORT and
+# migrations are used only when the cloned application
+# has them. A new installation requires the application's
+# first-run setup (User.Needs_Setup, set by
+# "flask init-production"), which makes the administrator
+# replace the placeholder email and password at first
+# sign-in, and stops with an error if the application
+# lacks it.
 #
 # Secrets are never written to the log or console.
 # Generated web credentials are shown once at the
@@ -66,6 +71,8 @@ NGINX_SITE="/etc/nginx/sites-available/pinpoint"
 BACKUP_ROOT="/var/backups/pinpoint"
 BACKUP_KEEP=5
 
+# Reserved placeholder domain. The PinPoint server rejects it as
+# a real email, so this must match the server's constant.
 ADMIN_EMAIL_DOMAIN="pinpoint.lan"
 CREDENTIALS_FILE="/root/pinpoint-install-credentials.txt"
 CREDENTIALS_MARKER="/var/lib/pinpoint/web-credentials-pending"
@@ -259,7 +266,9 @@ rollback_upgrade() {
         systemctl reload nginx >> "$LOG" 2>&1 || true
     fi
 
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
+    if [ ! -f "$SERVICE_FILE" ]; then
+        echo "✓ Restored $PREVIOUS_COMMIT. No $SERVICE_NAME service existed before this run, so none was restarted." | tee -a "$LOG"
+    elif systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "✓ Restored $PREVIOUS_COMMIT. PinPoint is running the previous version." | tee -a "$LOG"
     else
         echo "ERROR: Rollback could not restart $SERVICE_NAME." | tee -a "$LOG"
@@ -403,7 +412,15 @@ fi
 # [5/12] Get Repository
 ##################################################
 
-if [ -d "$APP_DIR/.git" ]; then
+# A repository alone is not an installation: a first install that
+# failed before step 10 leaves the clone behind with no service or
+# database. That is cloned again instead of "upgraded", so a re-run
+# is a clean first install and rollback never expects a service
+# that never existed.
+if [ -d "$APP_DIR/.git" ] \
+    && { [ -f "$SERVICE_FILE" ] \
+         || [ -f "$SERVER_DIR/system.db" ] \
+         || [ -f "$SERVER_DIR/history.db" ]; }; then
 
     echo
     echo "[5/12] Upgrading PinPoint repository..." | tee -a "$LOG"
@@ -627,12 +644,6 @@ else
     HAS_MIGRATIONS=0
 fi
 
-if run_app_flask --help 2> /dev/null | grep -q 'init-production'; then
-    HAS_INIT_PRODUCTION=1
-else
-    HAS_INIT_PRODUCTION=0
-fi
-
 NEW_ADMIN=0
 
 if [ "$DB_EXISTS" = "1" ]; then
@@ -678,6 +689,16 @@ EOF
 
 else
 
+    # Fail before the database exists: a re-run would treat an
+    # existing database as installed and never create the admin.
+    # Importing the model creates nothing.
+    run_app_python >> "$LOG" 2>&1 <<'EOF' || fail "Step 9/12: this PinPoint version has no first-run setup (User.Needs_Setup), so the administrator would not be made to replace the placeholder email. Install a newer PinPoint release."
+from app.system_models import User
+
+if not hasattr(User, "Needs_Setup"):
+    raise SystemExit("User.Needs_Setup is missing.")
+EOF
+
     # Create the schema.
     if [ "$HAS_MIGRATIONS" = "1" ]; then
 
@@ -702,72 +723,42 @@ EOF
     ADMIN_EMAIL="admin-$(openssl rand -hex 3 | cut -c1-5)@$ADMIN_EMAIL_DOMAIN"
     ADMIN_PASSWORD="$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-24)"
 
-    if [ "$HAS_INIT_PRODUCTION" = "1" ]; then
+    # The password is piped in, never passed as an argument.
+    # init-production creates the administrator with
+    # Needs_Setup, so the first sign-in goes through the
+    # application's first-run setup.
+    printf '%s\n' "$ADMIN_PASSWORD" \
+        | run_app_flask init-production \
+            --admin-email "$ADMIN_EMAIL" --password-stdin >> "$LOG" 2>&1 \
+        || fail "Step 9/12: 'flask init-production' failed. The administrator was not created."
 
-        # The password is piped in, never passed as an argument.
-        printf '%s\n' "$ADMIN_PASSWORD" \
-            | run_app_flask init-production \
-                --admin-email "$ADMIN_EMAIL" --password-stdin >> "$LOG" 2>&1 \
-            || fail "Administrator creation failed."
+    # Read-only check that the gate was really set. Only the
+    # email is passed in, never the password.
+    export ADMIN_EMAIL
 
-    else
-
-        export ADMIN_EMAIL ADMIN_PASSWORD
-
-        # Seed only permissions, roles and settings. The app's
-        # "flask seed" command also creates test users with a
-        # shared password, so it must not be used here.
-        run_app_python >> "$LOG" 2>&1 <<'EOF' || fail "Administrator creation failed."
+    run_app_python >> "$LOG" 2>&1 <<'EOF' || fail "Step 9/12: the administrator was created without first-run setup (Needs_Setup is not set), so nothing would make them replace the placeholder email."
 import os
 
 import sqlalchemy as sa
-from email_validator import validate_email
 
 from app import app, db
-from app.api.commands.seed import (
-    seed_permissions,
-    seed_roles,
-    seed_system_settings,
-)
-from app.system_models import Role, User, UserStatus
-
-email = os.environ["ADMIN_EMAIL"]
-password = os.environ["ADMIN_PASSWORD"]
-
-# Same check the login endpoint uses.
-validate_email(email, check_deliverability=False)
+from app.system_models import User
 
 with app.app_context():
-    seed_permissions()
-    seed_roles()
-    seed_system_settings()
-
-    role = db.session.scalar(
-        sa.select(Role).where(Role.Name == "Administrator")
+    admin = db.session.scalar(
+        sa.select(User).where(User.Email == os.environ["ADMIN_EMAIL"])
     )
 
-    admin = User(
-        First_Name="PinPoint",
-        Last_Name="Administrator",
-        Email=email,
-        RoleID=role.RoleID,
-        Status=UserStatus.ACTIVE,
-    )
-    admin.set_password(password)
+    if admin is None or not admin.Needs_Setup:
+        raise SystemExit("Administrator is missing or Needs_Setup is not set.")
 
-    db.session.add(admin)
-    db.session.commit()
-
-print("Administrator created.")
+print("Administrator must complete first-run setup at first sign-in.")
 EOF
-
-        export -n ADMIN_PASSWORD
-
-    fi
 
     NEW_ADMIN=1
 
     echo "✓ Administrator account created." | tee -a "$LOG"
+    echo "✓ Administrator must complete first-run setup (real email and new password)." | tee -a "$LOG"
 
 fi
 
@@ -990,14 +981,17 @@ PinPoint Web Installation
 URL:
 http://$SERVER_IP/
 
-Username (email):
+Username (temporary placeholder email):
 $ADMIN_EMAIL
 
 Password:
 $ADMIN_PASSWORD
 
 IMPORTANT:
-Change the password after first login.
+On first sign-in you will be asked to set your real email
+address and choose a new password. Notifications are sent to
+the email, and it becomes your sign-in name from then on. The
+placeholder and password above only work until you do.
 Do not commit or share this file.
 EOF
 

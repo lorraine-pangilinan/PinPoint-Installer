@@ -11,6 +11,11 @@
 #            - "systemctl reload nagios" via sudo,
 #              and nothing else
 #            - an SSH key for NCPA agent deployment
+#            - a send-only mail transport (msmtp) so
+#              Nagios notifications can leave the
+#              server, and a root-owned helper that
+#              lets the web interface change its
+#              settings without running as root
 #
 # nmap is given file capabilities (raw sockets only)
 # instead of running through sudo, so scans and NSE
@@ -65,6 +70,14 @@ SUDOERS_FILE="/etc/sudoers.d/pinpoint-nagios-reload"
 # (ncpa_deployment.py).
 NCPA_KEY_NAME="pinpoint_ncpa_deploy"
 
+# Mail transport. Nagios runs "mail" as the nagios account;
+# msmtp relays it to the SMTP server configured in MSMTP_CFG.
+# Only SMTP_HELPER (root) writes that file; the web interface
+# reaches it through the single sudoers rule in SMTP_SUDOERS_FILE.
+MSMTP_CFG="/etc/msmtprc"
+SMTP_HELPER="/usr/local/sbin/pinpoint-apply-smtp"
+SMTP_SUDOERS_FILE="/etc/sudoers.d/pinpoint-apply-smtp"
+
 ##################################################
 # Helpers
 ##################################################
@@ -94,11 +107,11 @@ echo " Started: $(date)" | tee -a "$LOG"
 echo "======================================" | tee -a "$LOG"
 
 ##################################################
-# [1/8] Check Prerequisites
+# [1/9] Check Prerequisites
 ##################################################
 
 echo
-echo "[1/8] Checking prerequisites..." | tee -a "$LOG"
+echo "[1/9] Checking prerequisites..." | tee -a "$LOG"
 
 if ! id "$APP_USER" > /dev/null 2>&1; then
     fail "Account $APP_USER not found. Run deploy-pinpoint-web.sh first."
@@ -115,11 +128,11 @@ fi
 echo "✓ Account $APP_USER, $GUNICORN_SERVICE and Nagios found." | tee -a "$LOG"
 
 ##################################################
-# [2/8] Install nmap
+# [2/9] Install nmap
 ##################################################
 
 echo
-echo "[2/8] Installing nmap..." | tee -a "$LOG"
+echo "[2/9] Installing nmap..." | tee -a "$LOG"
 
 # libcap2-bin provides setcap and getcap; openssh-client
 # provides ssh-keygen for the NCPA key.
@@ -133,11 +146,11 @@ fi
 echo "✓ $("$NMAP_BIN" --version | head -n 1) installed." | tee -a "$LOG"
 
 ##################################################
-# [3/8] Restrict nmap to the Service Account
+# [3/9] Restrict nmap to the Service Account
 ##################################################
 
 echo
-echo "[3/8] Restricting nmap to $APP_USER..." | tee -a "$LOG"
+echo "[3/9] Restricting nmap to $APP_USER..." | tee -a "$LOG"
 
 # A dpkg override keeps the owner and mode across nmap
 # upgrades. Changing the owner clears file capabilities,
@@ -152,11 +165,11 @@ dpkg-statoverride --update --add root "$APP_USER" 0750 "$NMAP_BIN" \
 echo "✓ $NMAP_BIN is root:$APP_USER 750." | tee -a "$LOG"
 
 ##################################################
-# [4/8] Apply nmap Capabilities
+# [4/9] Apply nmap Capabilities
 ##################################################
 
 echo
-echo "[4/8] Applying nmap capabilities..." | tee -a "$LOG"
+echo "[4/9] Applying nmap capabilities..." | tee -a "$LOG"
 
 cat > "$NMAP_CAPS_HELPER" <<EOF
 #!/bin/sh
@@ -204,11 +217,11 @@ systemctl daemon-reload
 echo "✓ $GUNICORN_SERVICE re-applies capabilities on start." | tee -a "$LOG"
 
 ##################################################
-# [5/8] Install nmap Wrapper
+# [5/9] Install nmap Wrapper
 ##################################################
 
 echo
-echo "[5/8] Installing $NMAP_WRAPPER..." | tee -a "$LOG"
+echo "[5/9] Installing $NMAP_WRAPPER..." | tee -a "$LOG"
 
 # The name is kept for the application; sudo is not used.
 # --privileged tells nmap to use its raw-socket rights
@@ -227,11 +240,11 @@ chmod 755 "$NMAP_WRAPPER"
 echo "✓ $NMAP_WRAPPER installed." | tee -a "$LOG"
 
 ##################################################
-# [6/8] Grant Nagios Configuration Access
+# [6/9] Grant Nagios Configuration Access
 ##################################################
 
 echo
-echo "[6/8] Granting Nagios configuration access..." | tee -a "$LOG"
+echo "[6/9] Granting Nagios configuration access..." | tee -a "$LOG"
 
 # The nagios group lets the app read every file that
 # "nagios -v" loads (resource.cfg is not world-readable).
@@ -305,11 +318,11 @@ rm -f "$SUDOERS_TMP"
 echo "✓ $APP_USER may run 'systemctl reload nagios' only." | tee -a "$LOG"
 
 ##################################################
-# [7/8] Create NCPA Deployment Key
+# [7/9] Create NCPA Deployment Key
 ##################################################
 
 echo
-echo "[7/8] Creating NCPA deployment key..." | tee -a "$LOG"
+echo "[7/9] Creating NCPA deployment key..." | tee -a "$LOG"
 
 APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
 SSH_DIR="$APP_HOME/.ssh"
@@ -327,11 +340,232 @@ else
 fi
 
 ##################################################
-# [8/8] Verify Privileges
+# [8/9] Install Mail Transport
 ##################################################
 
 echo
-echo "[8/8] Verifying privileges..." | tee -a "$LOG"
+echo "[8/9] Installing mail transport..." | tee -a "$LOG"
+
+# Nagios' notify-*-by-email commands pipe each message to
+# /bin/mail. bsd-mailx provides it and msmtp-mta delivers it
+# (a send-only client: no daemon, nothing listens on port 25).
+# mailutils is avoided on purpose: it can pull in Postfix.
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    msmtp-mta bsd-mailx >> "$LOG" 2>&1 \
+    || fail "Could not install msmtp-mta and bsd-mailx."
+
+if [ ! -x /bin/mail ]; then
+    fail "/bin/mail not found after installation (Nagios calls it)."
+fi
+
+echo "✓ msmtp-mta and bsd-mailx installed." | tee -a "$LOG"
+
+# Nagios sends the mail, so it must be able to read the file;
+# nobody else may, because it holds the SMTP password. Content
+# written earlier by the web interface is kept on a re-run.
+if [ ! -f "$MSMTP_CFG" ]; then
+    : > "$MSMTP_CFG"
+fi
+
+chown root:"$NAGIOS_GROUP" "$MSMTP_CFG"
+chmod 640 "$MSMTP_CFG"
+
+echo "✓ $MSMTP_CFG is root:$NAGIOS_GROUP 640." | tee -a "$LOG"
+
+# The web interface runs as an ordinary account and cannot
+# write to /etc. This helper does that one job as root. It
+# reads one JSON object on stdin (never arguments, which "ps"
+# can show), validates every field, and replaces $MSMTP_CFG
+# atomically. It never prints the password.
+cat > "$SMTP_HELPER" <<'HELPER_EOF'
+#!/usr/bin/python3 -I
+# Managed by PinPoint Installer.
+# Writes /etc/msmtprc from settings sent by the PinPoint web
+# interface. Input: one JSON object on stdin:
+#   {"host": str, "port": int, "tls": "starttls",
+#    "username": str, "password": str, "sender": str}
+# Exit 0 on success, 1 for rejected input, 2 for misuse.
+# Messages go to stderr and never contain the password.
+
+import grp
+import json
+import os
+import re
+import sys
+
+CONFIG = "/etc/msmtprc"
+OWNER_GROUP = "nagios"
+MAX_INPUT = 4096
+
+FIELDS = {"host", "port", "tls", "username", "password", "sender"}
+# Encryption is mandatory: the login is always sent, so a plain
+# connection would expose the password.
+TLS_MODES = {"starttls"}
+
+HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+# Any printable ASCII character, spaces included, so the admin can
+# choose a password freely. No control characters: a line break
+# would end the config line and let a value start another one.
+# The value is always written inside double quotes; msmtp removes
+# exactly the outer pair and keeps everything inside as typed
+# (checked for spaces, "#", quotes and backslashes).
+PRINTABLE_RE = re.compile(r"[ -~]+")
+
+
+def reject(message):
+    print("pinpoint-apply-smtp: " + message, file=sys.stderr)
+    sys.exit(1)
+
+
+def pairs(items):
+    keys = [key for key, _ in items]
+    if len(keys) != len(set(keys)):
+        reject("duplicate field in input.")
+    return dict(items)
+
+
+def text(data, name, limit):
+    value = data[name]
+    if not isinstance(value, str) or not value:
+        reject("'%s' must be a non-empty string." % name)
+    if len(value) > limit:
+        reject("'%s' is too long." % name)
+    return value
+
+
+def main():
+    if len(sys.argv) > 1:
+        print("pinpoint-apply-smtp: takes no arguments; send JSON on stdin.",
+              file=sys.stderr)
+        sys.exit(2)
+
+    if os.geteuid() != 0:
+        print("pinpoint-apply-smtp: must run as root (use sudo).",
+              file=sys.stderr)
+        sys.exit(2)
+
+    raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+    if len(raw) > MAX_INPUT:
+        reject("input is too large.")
+
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    except (UnicodeDecodeError, ValueError):
+        reject("input is not valid JSON.")
+
+    if not isinstance(data, dict):
+        reject("input must be a JSON object.")
+    if set(data) != FIELDS:
+        reject("fields must be exactly: " + ", ".join(sorted(FIELDS)) + ".")
+
+    host = text(data, "host", 253)
+    if not HOST_RE.fullmatch(host):
+        reject("'host' is not a valid host name or address.")
+
+    port = data["port"]
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        reject("'port' must be a number from 1 to 65535.")
+
+    tls = text(data, "tls", 16)
+    if tls not in TLS_MODES:
+        reject("'tls' must be starttls.")
+
+    username = text(data, "username", 254)
+    if not PRINTABLE_RE.fullmatch(username):
+        reject("'username' may only contain printable characters.")
+
+    password = text(data, "password", 256)
+    if not PRINTABLE_RE.fullmatch(password):
+        reject("'password' may only contain printable characters "
+               "(no line breaks, tabs or other control characters).")
+
+    sender = text(data, "sender", 254)
+    if not EMAIL_RE.fullmatch(sender):
+        reject("'sender' is not a valid email address.")
+
+    lines = [
+        "# Managed by PinPoint. Written by pinpoint-apply-smtp; edits are overwritten.",
+        "defaults",
+        "auth on",
+        "tls_trust_file /etc/ssl/certs/ca-certificates.crt",
+        "syslog on",
+        "",
+        "account pinpoint",
+        "host " + host,
+        "port %d" % port,
+        "tls on",
+        "tls_starttls on",
+        "from " + sender,
+        'user "' + username + '"',
+        'password "' + password + '"',
+        "",
+        "account default : pinpoint",
+        "",
+    ]
+
+    gid = grp.getgrnam(OWNER_GROUP).gr_gid
+    temp = CONFIG + ".tmp"
+
+    # Replace atomically: a crash leaves the old file or the new
+    # one, never half of either. The temp file is created with the
+    # final owner and mode, so the password is never exposed.
+    try:
+        os.unlink(temp)
+    except FileNotFoundError:
+        pass
+
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+    try:
+        os.fchown(fd, 0, gid)
+        os.fchmod(fd, 0o640)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write("\n".join(lines))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, CONFIG)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+main()
+HELPER_EOF
+
+chown root:root "$SMTP_HELPER"
+chmod 755 "$SMTP_HELPER"
+
+echo "✓ $SMTP_HELPER installed." | tee -a "$LOG"
+
+# Only this exact command. The empty string "" means it may
+# be run with no arguments at all.
+SMTP_SUDOERS_TMP="$(mktemp)"
+
+cat > "$SMTP_SUDOERS_TMP" <<EOF
+# Managed by PinPoint Installer.
+# Lets the PinPoint web interface apply validated SMTP settings.
+$APP_USER ALL=(root) NOPASSWD: $SMTP_HELPER ""
+EOF
+
+if ! visudo -cf "$SMTP_SUDOERS_TMP" >> "$LOG" 2>&1; then
+    rm -f "$SMTP_SUDOERS_TMP"
+    fail "Generated SMTP sudoers rule is invalid."
+fi
+
+install -m 440 -o root -g root "$SMTP_SUDOERS_TMP" "$SMTP_SUDOERS_FILE"
+rm -f "$SMTP_SUDOERS_TMP"
+
+echo "✓ $APP_USER may run $SMTP_HELPER only." | tee -a "$LOG"
+
+##################################################
+# [9/9] Verify Privileges
+##################################################
+
+echo
+echo "[9/9] Verifying privileges..." | tee -a "$LOG"
 
 # Restart so the service picks up the nagios group and
 # re-applies nmap capabilities.
@@ -396,6 +630,50 @@ if runuser -u "$APP_USER" -- sudo -n -l /usr/bin/systemctl restart nagios > /dev
 fi
 
 echo "✓ $APP_USER can reload Nagios and nothing else through sudo." | tee -a "$LOG"
+
+# Mail transport: Nagios must find "mail", read the msmtp
+# settings, and be the only account besides root that can.
+if ! runuser -u nagios -- test -x /bin/mail; then
+    fail "nagios cannot run /bin/mail."
+fi
+
+if ! runuser -u nagios -- test -r "$MSMTP_CFG"; then
+    fail "nagios cannot read $MSMTP_CFG."
+fi
+
+if [ "$(stat -c '%U:%G %a' "$MSMTP_CFG")" != "root:$NAGIOS_GROUP 640" ]; then
+    fail "$MSMTP_CFG must be root:$NAGIOS_GROUP 640."
+fi
+
+if runuser -u nobody -- test -r "$MSMTP_CFG"; then
+    fail "$MSMTP_CFG can be read by accounts other than root and $NAGIOS_GROUP."
+fi
+
+if runuser -u "$APP_USER" -- test -w "$MSMTP_CFG"; then
+    fail "$APP_USER can write $MSMTP_CFG directly."
+fi
+
+if dpkg -s postfix > /dev/null 2>&1 || dpkg -s mailutils > /dev/null 2>&1; then
+    fail "postfix or mailutils is installed; only a send-only msmtp transport is expected."
+fi
+
+if ss -ltn | grep -q ':25 '; then
+    fail "A service is listening on port 25; no mail server should run."
+fi
+
+if [ "$(stat -c '%U:%G %a' "$SMTP_HELPER")" != "root:root 755" ]; then
+    fail "$SMTP_HELPER must be root:root 755."
+fi
+
+if ! runuser -u "$APP_USER" -- sudo -n -l "$SMTP_HELPER" > /dev/null 2>&1; then
+    fail "$APP_USER cannot run $SMTP_HELPER through sudo."
+fi
+
+if runuser -u "$APP_USER" -- sudo -n -l /bin/cat > /dev/null 2>&1; then
+    fail "$APP_USER has more sudo rights than the SMTP helper and Nagios reload."
+fi
+
+echo "✓ Mail transport ready; $APP_USER can run $SMTP_HELPER and nothing else new." | tee -a "$LOG"
 
 if ! runuser -u "$APP_USER" -- test -r "$NCPA_KEY"; then
     fail "$APP_USER cannot read $NCPA_KEY."
