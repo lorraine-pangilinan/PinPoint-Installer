@@ -62,7 +62,7 @@ Status of every case: **not run** unless a result is written in the Result colum
 | C6 | Rights are narrow | As `pinpoint`: `sudo -n -l /usr/local/sbin/pinpoint-apply-smtp`, then `sudo -n -l /bin/cat` | First is allowed. Second is refused. | |
 | C7 | Flask cannot write `/etc` | As `pinpoint`: `touch /etc/msmtprc` | Permission denied. | |
 | C8 | Nagios reload rule intact | `sudo -n -l /usr/bin/systemctl reload nagios` as `pinpoint`, and `restart nagios` | Reload allowed, restart refused (existing behaviour). | |
-| C9 | Mail command resolves | As `nagios`: `command -v mail` and check the path in Nagios `commands.cfg` | `mail` exists at the path `notify-*-by-email` calls. | |
+| C9 | Mail command resolves | `grep -n 'by-email' /usr/local/nagios/etc/objects/commands.cfg` shows the commands call `/bin/mail`. Then, as `nagios`: `test -x /bin/mail`. | `/bin/mail` exists and `nagios` can run it. No change to `commands.cfg` is needed. | |
 | C10 | msmtp is the transport | `readlink -f $(command -v sendmail)` | Points to msmtp. | |
 | C11 | Script is idempotent | Run `configure-pinpoint-privileges.sh` twice | Second run succeeds. No duplicate sudoers lines, `/etc/msmtprc` content is not wiped. | |
 
@@ -76,14 +76,21 @@ Feed it on stdin. Run as `pinpoint` through sudo.
 | D2 | Password stays secret | Run D1, then check `ps`, the log, helper stdout and stderr | Password appears nowhere except `/etc/msmtprc`. | |
 | D3 | Atomic write | Kill the helper mid-write | `/etc/msmtprc` is the old complete file or the new one, never partial. | |
 | D4 | Bad port | Port `0`, `70000`, `abc` | Non-zero exit, short message, file unchanged. | |
-| D5 | Bad TLS mode | Value outside none / starttls / ssl | Non-zero exit, file unchanged. | |
+| D5 | Bad TLS mode | `none` (never allowed: the login is always sent), or any value outside starttls / ssl | Non-zero exit, file unchanged. | |
 | D6 | Newline injection | Host or user containing `\n` followed by extra msmtp directives | Rejected, file unchanged, no extra directive written. | |
-| D7 | Shell metacharacters | `;`, `$(...)`, backticks, quotes in every field | Rejected or written literally and harmlessly. Nothing executes. | |
+| D7 | Control characters and shell syntax | Tab, ``, ``, DEL and non-ASCII in `username`/`password`; `$(...)` in the password | Control and non-ASCII rejected. `$(...)` is written literally inside quotes. Nothing executes. | |
 | D8 | Missing field | Empty host or empty password | Non-zero exit, file unchanged. | |
 | D9 | Oversized input | Several MB on stdin | Rejected quickly. | |
 | D10 | No arguments accepted | Pass the settings as arguments | Ignored or refused. Never read from the command line. | |
 | D11 | Ownership kept | Run D1 repeatedly | Owner and mode stay `root:nagios 640` every time. | |
 | D12 | Non-root direct run | Run the helper as `pinpoint` without sudo | Fails with a clear message. | |
+| D13 | Real web path | As `pinpoint`: `sudo -n /usr/local/sbin/pinpoint-apply-smtp` with valid JSON on stdin | Exit 0 and `/etc/msmtprc` updated. | |
+| D15 | Password round trip | Apply 18 awkward passwords (spaces, leading/trailing blanks, `#`, `"`, `\`, `$`, 256 characters) for 4 usernames, then send with the real msmtp to a fake local SMTP server | The server receives exactly the username and password that were typed. | |
+| D14 | Trailing newline | Valid JSON where `username`, `password`, `host` or `sender` ends in `\n` | Exit 1, file unchanged. Guards against Python's `$` matching before a final newline (the helper uses `fullmatch`). | |
+
+Input contract for the helper (stdin, one JSON object, exactly these fields):
+`{"host": str, "port": int 1-65535, "tls": "starttls"|"ssl", "username": str, "password": str, "sender": email}`.
+`username` and `password` may contain any printable ASCII character, spaces included. Control characters (line breaks, tabs) and non-ASCII are rejected.
 
 ## E. Phase 4: end to end (needs PINPOINT-NEW with SMTP settings)
 

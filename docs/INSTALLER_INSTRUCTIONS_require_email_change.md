@@ -35,10 +35,34 @@ the flag to false.
    address, not `pinpoint.lan`.
 6. Signing in with the placeholder no longer works; the new address does.
 
-## Phase 4 (separate branch, not part of this change)
+## Phase 4: mail transport (`setup/configure-pinpoint-privileges.sh`, step 8/9)
 
-msmtp and `bsd-mailx`, `/etc/msmtprc`, the root-owned Python helper
-`/usr/local/sbin/pinpoint-apply-smtp` and its single-command sudoers rule, all in
-`setup/configure-pinpoint-privileges.sh`. The helper reads settings on stdin, validates them,
-and writes `/etc/msmtprc` mode 640 `root:nagios`. Do not install `mailutils` (it can pull in
-Postfix).
+| # | Change | Why |
+|---|---|---|
+| 1 | Install `msmtp-mta` and `bsd-mailx` with `--no-install-recommends`. Never `mailutils` (it can pull in Postfix). | Nagios' `notify-*-by-email` commands in `/usr/local/nagios/etc/objects/commands.cfg` pipe each message to `/bin/mail`, which does not exist by default. No change to `commands.cfg` is needed. |
+| 2 | Create `/etc/msmtprc` as `root:nagios 640`, and keep its content on a re-run. | Nagios runs `mail`, so it must read the file. Nobody else may; it holds the SMTP password. |
+| 3 | Install the root-owned Python helper `/usr/local/sbin/pinpoint-apply-smtp` (755). | The web interface runs unprivileged and cannot write `/etc`. |
+| 4 | Add `/etc/sudoers.d/pinpoint-apply-smtp`: `pinpoint ALL=(root) NOPASSWD: /usr/local/sbin/pinpoint-apply-smtp ""`. | Lets PinPoint run only that helper, with no arguments. |
+| 5 | Extend the verification step (now 9/9) to check the above, including that `pinpoint` cannot write `/etc/msmtprc` and has no other new sudo rights. | Catches a wrong mode or rule at install time. |
+
+Helper input contract, for the PinPoint server to build against. One JSON object on **stdin**
+(never arguments), exactly these fields, nothing else:
+
+```json
+{"host": "smtp.gmail.com", "port": 587, "tls": "starttls",
+ "username": "you@gmail.com", "password": "<app password>", "sender": "you@gmail.com"}
+```
+
+- `tls`: `starttls` (port 587) or `ssl` (port 465). `none` is refused: the login is always
+  sent, so an unencrypted connection would expose the password.
+- `username` and `password`: any printable ASCII character, spaces included, so the admin can
+  choose freely. Control characters and non-ASCII are rejected. The helper writes both inside
+  double quotes, which msmtp removes as one outer pair (tested with spaces, `#`, quotes and
+  backslashes). Gmail shows app passwords with spaces; Gmail expects them as 16 letters.
+- Input over 4 KiB, duplicate or extra fields, wrong types, or a newline anywhere are rejected.
+- Exit codes: `0` applied, `1` rejected input (reason on stderr, never the password), `2`
+  misuse (arguments given, or not run as root). The server should show stderr in the card.
+- Run it as `sudo -n /usr/local/sbin/pinpoint-apply-smtp`. The password also exists in plain
+  text in `/etc/msmtprc` (msmtp needs it), readable only by root and `nagios`.
+
+Messages are sent through syslog (`journalctl -t msmtp`); msmtp does not retry.
