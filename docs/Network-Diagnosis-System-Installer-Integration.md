@@ -128,11 +128,12 @@ Because of that last point, the **first** revision must describe the schema exac
 **Change.** Add a supported command that seeds only reference data and creates one administrator:
 
 ```bash
-flask init-production --admin-email admin-7f3a2@pinpoint.lan --password-stdin
+flask init-production --admin-email admin-7f3a2@pinpoint.lan --password-stdin --require-email-change
 ```
 
 Requirements:
 
+- `--require-email-change` sets `Must_Change_Email` on the new administrator, so the first sign-in forces a real email address. The installer always passes it and stops with an error if the option does not exist.
 - Seeds permissions, roles and system settings. Creates **no** test users.
 - Reads the password from stdin, never from an argument (arguments show up in `ps` and shell history).
 - Hashes the password with `User.set_password`.
@@ -215,6 +216,7 @@ Also confirm the supported Python version. The README says 3.14.2 and the instal
 - [ ] No lab IP, subnet, password or secret key is required from source code in production.
 - [ ] `server/migrations/` is committed, and `flask db upgrade` builds both `system.db` and `history.db` from empty.
 - [ ] `flask init-production` creates one administrator and no test users.
+- [ ] `flask init-production --require-email-change` sets `Must_Change_Email` on that administrator.
 - [ ] Importing `app` does not start the scheduler unless `PINPOINT_SCHEDULER=1`.
 - [ ] `reset_db.sh` has no user-specific paths.
 - [ ] Cookie files and lab host configs are no longer tracked.
@@ -229,7 +231,7 @@ PinPoint-Installer is ready for these changes and still works with `main` as it 
 |---|---|---|
 | `NAGIOS_PORT` in `config.py` | writes `NAGIOS_HOST=127.0.0.1` and `NAGIOS_PORT=8081` | writes `NAGIOS_HOST=127.0.0.1:8081` |
 | `server/migrations/env.py` | runs `flask db upgrade` and checks both databases are at the latest revision | runs `db.create_all()` |
-| a `flask init-production` command | pipes the generated password to it | imports the seed functions directly |
+| a `flask init-production --require-email-change` option | pipes the generated password to it | stops a new installation with an error (existing installs are unaffected) |
 
 In every case it:
 
