@@ -259,7 +259,9 @@ rollback_upgrade() {
         systemctl reload nginx >> "$LOG" 2>&1 || true
     fi
 
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
+    if [ ! -f "$SERVICE_FILE" ]; then
+        echo "✓ Restored $PREVIOUS_COMMIT. No $SERVICE_NAME service existed before this run, so none was restarted." | tee -a "$LOG"
+    elif systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "✓ Restored $PREVIOUS_COMMIT. PinPoint is running the previous version." | tee -a "$LOG"
     else
         echo "ERROR: Rollback could not restart $SERVICE_NAME." | tee -a "$LOG"
@@ -403,7 +405,15 @@ fi
 # [5/12] Get Repository
 ##################################################
 
-if [ -d "$APP_DIR/.git" ]; then
+# A repository alone is not an installation: a first install that
+# failed before step 10 leaves the clone behind with no service or
+# database. That is cloned again instead of "upgraded", so a re-run
+# is a clean first install and rollback never expects a service
+# that never existed.
+if [ -d "$APP_DIR/.git" ] \
+    && { [ -f "$SERVICE_FILE" ] \
+         || [ -f "$SERVER_DIR/system.db" ] \
+         || [ -f "$SERVER_DIR/history.db" ]; }; then
 
     echo
     echo "[5/12] Upgrading PinPoint repository..." | tee -a "$LOG"
