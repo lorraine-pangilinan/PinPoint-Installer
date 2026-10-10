@@ -382,7 +382,7 @@ cat > "$SMTP_HELPER" <<'HELPER_EOF'
 # Managed by PinPoint Installer.
 # Writes /etc/msmtprc from settings sent by the PinPoint web
 # interface. Input: one JSON object on stdin:
-#   {"host": str, "port": int, "tls": "starttls"|"ssl",
+#   {"host": str, "port": int, "tls": "starttls",
 #    "username": str, "password": str, "sender": str}
 # Exit 0 on success, 1 for rejected input, 2 for misuse.
 # Messages go to stderr and never contain the password.
@@ -400,7 +400,7 @@ MAX_INPUT = 4096
 FIELDS = {"host", "port", "tls", "username", "password", "sender"}
 # Encryption is mandatory: the login is always sent, so a plain
 # connection would expose the password.
-TLS_MODES = {"starttls", "ssl"}
+TLS_MODES = {"starttls"}
 
 HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
@@ -469,7 +469,7 @@ def main():
 
     tls = text(data, "tls", 16)
     if tls not in TLS_MODES:
-        reject("'tls' must be starttls or ssl.")
+        reject("'tls' must be starttls.")
 
     username = text(data, "username", 254)
     if not PRINTABLE_RE.fullmatch(username):
@@ -495,7 +495,7 @@ def main():
         "host " + host,
         "port %d" % port,
         "tls on",
-        "tls_starttls " + ("on" if tls == "starttls" else "off"),
+        "tls_starttls on",
         "from " + sender,
         'user "' + username + '"',
         'password "' + password + '"',

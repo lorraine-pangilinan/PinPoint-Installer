@@ -1,8 +1,10 @@
 # Test Cases: Admin Email Gate and SMTP Notifications
 
-Covers the installer side of `SMTP_Admin_Email_Plan.md` (Phases 3 and 4) and the end-to-end
-checks that need the PinPoint server and client. Server and client unit tests are listed in
-plan section 7 and are not repeated here.
+Covers the installer side of `SMTP_Admin_Email_Plan.md` and the end-to-end checks that need
+the PinPoint server. PinPoint already ships its own first-run setup (`User.Needs_Setup`,
+`POST /api/user/complete-setup`, the `FirstRunSetup` screen), which replaces the plan's
+`--require-email-change` / `Must_Change_Email` design. The installer relies on that, so the
+cases below test the installer against it. Server and client unit tests are PinPoint's own.
 
 Status of every case: **not run** unless a result is written in the Result column.
 
@@ -10,45 +12,49 @@ Status of every case: **not run** unless a result is written in the Result colum
 
 - **VM**: disposable Ubuntu 22.04 (the supported target), snapshot taken before each run.
   A 24.04 run is indicative only.
-- **PINPOINT-OLD**: a PinPoint release without `--require-email-change`.
-- **PINPOINT-NEW**: a release with Phase 1 (flag, `Must_Change_Email`, email route).
+- **Fresh run**: needs a VM restored from a snapshot with no PinPoint database. Cases A3-A7, P1
+  and B1-B9 are skipped on an installed system; A10-A11 then test the upgrade.
 - Commands run on the VM as root unless stated. Never paste real passwords into this file.
 - "Log" means `/var/log/pinpoint-web.log` for `deploy-pinpoint-web.sh` and
   `/var/log/pinpoint-privileges.log` for `configure-pinpoint-privileges.sh`.
 
 ---
 
-## A. Phase 3: email gate requested by the installer
+## A. Installer: fresh install and upgrade
 
 | ID | Case | Steps | Expected | Result |
 |---|---|---|---|---|
-| A1 | Old PinPoint is refused before the database exists | Fresh VM, install with PINPOINT-OLD | Install stops at step 9/12 with `this PinPoint version has no 'flask init-production --require-email-change'`. `system.db` and `history.db` do not exist. | |
-| A2 | Re-run after A1 still has no half-installed state | Run `deploy-pinpoint-web.sh` again on the VM from A1 | Same error, same stop. It is not treated as an existing install and does not skip admin creation. | |
-| A3 | New PinPoint creates a gated admin | Fresh VM, install with PINPOINT-NEW | Log shows `Administrator account created.` and `Administrator must set a real email at first sign-in.` | |
-| A4 | Admin row has the flag | After A3: query `User.Must_Change_Email` for the admin through the app environment | `True`. Exactly one user exists. | |
-| A5 | Placeholder format | Read the credentials file | Username matches `admin-[0-9a-f]{5}@pinpoint.lan`. Label says temporary placeholder. | |
-| A6 | Credentials file wording | `sudo pinpoint-web-credentials` | Text explains the first-login email step and that the placeholder stops working afterwards. | |
-| A7 | Password never leaks | `grep` the log and `ps` during install for the generated password | Not found in the log, not in any process argument. | |
-| A8 | Flag check failure of the command itself | Make `init-production` fail (for example run with the database file read-only) | Install stops with `flask init-production --require-email-change' failed. The administrator was not created.` | |
-| A9 | Flag-set check fails loudly | Simulate an admin created without the flag | Install stops with `created without the first-login email requirement`. | |
-| A10 | Existing install is not gated | Run `deploy-pinpoint-web.sh` on a VM that already has a database | Upgrade completes. No new admin, no credentials file, no error about the flag. | |
-| A11 | Upgrade keeps the database | After A10 | Existing users unchanged and `Must_Change_Email` false for all. | |
+| A1 | Old PinPoint is refused before the database exists | Install with a PinPoint whose `User` model has no `Needs_Setup` | Install stops at step 9/12 with `this PinPoint version has no first-run setup`. No database exists afterwards. | not run (no such PinPoint available) |
+| A2 | Re-run after A1 | Run `deploy-pinpoint-web.sh` again | Same error. Treated as a fresh install, not an upgrade (no rollback message). | not run (see A1) |
+| A3 | Fresh install succeeds | Fresh run of `deploy-pinpoint-web.sh` | Exit 0 and `Administrator must complete first-run setup (real email and new password).` | |
+| A4 | Admin row | Read `USER` in `system.db` | Exactly one user, `admin-xxxxx@pinpoint.lan`, `Needs_Setup=1`. | |
+| A5 | Credentials file | `stat` and read it | `root:root 600`, shows the placeholder username. | |
+| A6 | Credentials file wording | Read it | Says temporary placeholder, asks for a real email and a new password, no longer says "change the password after first login". | |
+| A7 | Password never leaks | `grep` the deploy log and console output for the generated password | Not found. | |
+| A8 | `init-production` fails | Make the command fail (read-only database) | Install stops with `'flask init-production' failed. The administrator was not created.` | not run |
+| A9 | Gate flag missing after creation | Simulate an admin created without `Needs_Setup` | Install stops with `created without first-run setup`. | not run |
+| A10 | Installed system is upgraded | Run `deploy-pinpoint-web.sh` on an installed system | Takes the upgrade path, creates no administrator. | |
+| A11 | Upgrade keeps data | After A10 | Users and credentials file unchanged. | |
 | A12 | Script syntax | `bash -n` on every file in `setup/` | No errors. | |
+| P1 | Privileges script end to end | Run `configure-pinpoint-privileges.sh` after the deploy | Exit 0 with all 9 steps and its own checks passing. If `unattended-upgrades` holds the apt lock the nmap step fails; wait for the lock and re-run. | |
 
-## B. First sign-in and Nagios contact (needs PINPOINT-NEW, server and client)
+## B. First sign-in against PinPoint's first-run setup
+
+Run against the real API through Nginx (`/api/user/login`, `/api/user/me`,
+`/api/user/complete-setup`).
 
 | ID | Case | Steps | Expected | Result |
 |---|---|---|---|---|
-| B1 | Gate appears | Sign in with the placeholder | "Set your email" screen. Other pages are blocked. | |
-| B2 | Other API blocked | With the session, call any normal API | 403 with the email-change message, not the password one. | |
-| B3 | Placeholder rejected | Submit an address ending in `@pinpoint.lan` | Rejected. Flag stays set. | |
-| B4 | Wrong current password | Submit a real address with a wrong password | Rejected, nothing saved. | |
-| B5 | Duplicate address | Submit an address another user holds | 409, nothing saved. | |
-| B6 | Success | Submit a valid new address and the correct password | App opens. Flag cleared. | |
-| B7 | Sign-in name changed | Sign out, sign in with the placeholder, then with the new address | Placeholder fails. New address works. | |
-| B8 | Nagios contact updated | `grep -A6 'define contact' /usr/local/nagios/etc/objects/hosts.cfg` | Contact `email` is the new address. No `pinpoint.lan`. | |
-| B9 | Nagios still valid | `/usr/local/nagios/bin/nagios -v /usr/local/nagios/etc/nagios.cfg` | Passes with no errors. | |
-| B10 | Regeneration failure | Make `hosts.cfg` unwritable, then submit the change | Email is still saved, response carries a warning, error is logged. Admin is not stuck. | |
+| B1 | Gate is on | Sign in with the placeholder and the generated password, then `GET /api/user/me` | Login 200 and `needs_setup` is true. | |
+| B2 | Everything else is blocked | `GET /api/system/discovery-settings` with that session | 403 mentioning first-run setup. | |
+| B3 | Placeholder and reserved domains rejected | `complete-setup` with `@pinpoint.lan`, then `@company.lan` | Both 400. `needs_setup` stays true. | |
+| B4 | Wrong current password | `complete-setup` with a wrong current password | 400, nothing saved. | |
+| B5 | Password rules | Mismatching confirmation, a weak password, the same password as before | All 400. | |
+| B6 | Success | Valid email, strong new password | 200. | |
+| B7 | Result of success | `/me`, the protected endpoint, old and new logins | `needs_setup` false, protected endpoint 200, placeholder login 401, new login 200. | |
+| B8 | Nagios contact | `grep -A6 'define contact' /usr/local/nagios/etc/objects/hosts.cfg` | Contact `email` is the new address. No `pinpoint.lan`. Requires P1 first, because the privileges script lets PinPoint write the file. | |
+| B9 | Nagios still valid | `/usr/local/nagios/bin/nagios -v /usr/local/nagios/etc/nagios.cfg` | 0 errors. | |
+| B10 | Regeneration failure | Make `hosts.cfg` unwritable, then run `complete-setup` | Email saved, response says the Nagios contact could not be updated. Admin is not stuck. | not run (the first run showed this behaviour by accident, see the result file) |
 
 ## C. Phase 4: mail transport on the appliance
 
@@ -76,7 +82,7 @@ Feed it on stdin. Run as `pinpoint` through sudo.
 | D2 | Password stays secret | Run D1, then check `ps`, the log, helper stdout and stderr | Password appears nowhere except `/etc/msmtprc`. | |
 | D3 | Atomic write | Kill the helper mid-write | `/etc/msmtprc` is the old complete file or the new one, never partial. | |
 | D4 | Bad port | Port `0`, `70000`, `abc` | Non-zero exit, short message, file unchanged. | |
-| D5 | Bad TLS mode | `none` (never allowed: the login is always sent), or any value outside starttls / ssl | Non-zero exit, file unchanged. | |
+| D5 | Bad TLS mode | `none` (never allowed: the login is always sent), `ssl`, or any value other than `starttls` | Non-zero exit, file unchanged. | |
 | D6 | Newline injection | Host or user containing `\n` followed by extra msmtp directives | Rejected, file unchanged, no extra directive written. | |
 | D7 | Control characters and shell syntax | Tab, ``, ``, DEL and non-ASCII in `username`/`password`; `$(...)` in the password | Control and non-ASCII rejected. `$(...)` is written literally inside quotes. Nothing executes. | |
 | D8 | Missing field | Empty host or empty password | Non-zero exit, file unchanged. | |
@@ -89,10 +95,10 @@ Feed it on stdin. Run as `pinpoint` through sudo.
 | D14 | Trailing newline | Valid JSON where `username`, `password`, `host` or `sender` ends in `\n` | Exit 1, file unchanged. Guards against Python's `$` matching before a final newline (the helper uses `fullmatch`). | |
 
 Input contract for the helper (stdin, one JSON object, exactly these fields):
-`{"host": str, "port": int 1-65535, "tls": "starttls"|"ssl", "username": str, "password": str, "sender": email}`.
+`{"host": str, "port": int 1-65535, "tls": "starttls", "username": str, "password": str, "sender": email}`.
 `username` and `password` may contain any printable ASCII character, spaces included. Control characters (line breaks, tabs) and non-ASCII are rejected.
 
-## E. Phase 4: end to end (needs PINPOINT-NEW with SMTP settings)
+## E. Phase 4: end to end (needs the PinPoint SMTP settings API, which does not exist yet)
 
 Use a throwaway Gmail account with an app password.
 

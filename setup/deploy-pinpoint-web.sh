@@ -23,9 +23,12 @@
 # after the changes in docs/Network-Diagnosis-
 # System-Installer-Integration.md: NAGIOS_PORT and
 # migrations are used only when the cloned application
-# has them. A new installation requires
-# "flask init-production --require-email-change" and
-# stops with an error if the application lacks it.
+# has them. A new installation requires the application's
+# first-run setup (User.Needs_Setup, set by
+# "flask init-production"), which makes the administrator
+# replace the placeholder email and password at first
+# sign-in, and stops with an error if the application
+# lacks it.
 #
 # Secrets are never written to the log or console.
 # Generated web credentials are shown once at the
@@ -688,12 +691,13 @@ else
 
     # Fail before the database exists: a re-run would treat an
     # existing database as installed and never create the admin.
-    # init-production lists its options in --help, so a missing
-    # option is detected without creating anything.
-    if ! run_app_flask init-production --help 2>> "$LOG" \
-            | grep -q -- '--require-email-change'; then
-        fail "Step 9/12: this PinPoint version has no 'flask init-production --require-email-change'. Install a PinPoint release that includes the first-login email step."
-    fi
+    # Importing the model creates nothing.
+    run_app_python >> "$LOG" 2>&1 <<'EOF' || fail "Step 9/12: this PinPoint version has no first-run setup (User.Needs_Setup), so the administrator would not be made to replace the placeholder email. Install a newer PinPoint release."
+from app.system_models import User
+
+if not hasattr(User, "Needs_Setup"):
+    raise SystemExit("User.Needs_Setup is missing.")
+EOF
 
     # Create the schema.
     if [ "$HAS_MIGRATIONS" = "1" ]; then
@@ -720,20 +724,19 @@ EOF
     ADMIN_PASSWORD="$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-24)"
 
     # The password is piped in, never passed as an argument.
-    # --require-email-change makes the administrator replace the
-    # placeholder email at first sign-in (support was checked
-    # before the database was created, above).
+    # init-production creates the administrator with
+    # Needs_Setup, so the first sign-in goes through the
+    # application's first-run setup.
     printf '%s\n' "$ADMIN_PASSWORD" \
         | run_app_flask init-production \
-            --admin-email "$ADMIN_EMAIL" --password-stdin \
-            --require-email-change >> "$LOG" 2>&1 \
-        || fail "Step 9/12: 'flask init-production --require-email-change' failed. The administrator was not created."
+            --admin-email "$ADMIN_EMAIL" --password-stdin >> "$LOG" 2>&1 \
+        || fail "Step 9/12: 'flask init-production' failed. The administrator was not created."
 
     # Read-only check that the gate was really set. Only the
     # email is passed in, never the password.
     export ADMIN_EMAIL
 
-    run_app_python >> "$LOG" 2>&1 <<'EOF' || fail "Step 9/12: the administrator was created without the first-login email requirement (Must_Change_Email is not set)."
+    run_app_python >> "$LOG" 2>&1 <<'EOF' || fail "Step 9/12: the administrator was created without first-run setup (Needs_Setup is not set), so nothing would make them replace the placeholder email."
 import os
 
 import sqlalchemy as sa
@@ -746,16 +749,16 @@ with app.app_context():
         sa.select(User).where(User.Email == os.environ["ADMIN_EMAIL"])
     )
 
-    if admin is None or not admin.Must_Change_Email:
-        raise SystemExit("Administrator is missing or Must_Change_Email is not set.")
+    if admin is None or not admin.Needs_Setup:
+        raise SystemExit("Administrator is missing or Needs_Setup is not set.")
 
-print("Administrator requires an email change at first sign-in.")
+print("Administrator must complete first-run setup at first sign-in.")
 EOF
 
     NEW_ADMIN=1
 
     echo "✓ Administrator account created." | tee -a "$LOG"
-    echo "✓ Administrator must set a real email at first sign-in." | tee -a "$LOG"
+    echo "✓ Administrator must complete first-run setup (real email and new password)." | tee -a "$LOG"
 
 fi
 
@@ -986,10 +989,9 @@ $ADMIN_PASSWORD
 
 IMPORTANT:
 On first sign-in you will be asked to set your real email
-address. Notifications are sent to it, and it becomes your
-sign-in name from then on. The placeholder above only works
-until you do.
-Change the password after first login.
+address and choose a new password. Notifications are sent to
+the email, and it becomes your sign-in name from then on. The
+placeholder and password above only work until you do.
 Do not commit or share this file.
 EOF
 

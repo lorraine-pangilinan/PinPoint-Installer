@@ -3,6 +3,11 @@
 Result of running `tests/smtp-admin-email-tests.sh`. Case descriptions are in
 `docs/SMTP_Admin_Email_Test_Cases.md`.
 
+> **Update (Run 5):** Runs 1 and 2 tested the installer against a PinPoint without a first-run
+> gate, using the plan's `--require-email-change` design. PinPoint has its own first-run setup
+> (`Needs_Setup`, `complete-setup`), so the installer was reworked and those A1/A2 cases no
+> longer apply. The findings and later runs still stand. Read Run 5 for the current state.
+
 ## Run 1
 
 | Item | Value |
@@ -192,3 +197,91 @@ that it reached the inbox still has to be confirmed by looking at the mailbox. T
 configuration was wiped from the VM afterwards (`/etc/msmtprc` is empty again).
 
 Still not run: a real **Nagios-triggered** alert (E8), recovery mail (E9), Ubuntu 22.04.
+
+---
+
+## Run 5 (installer reworked to PinPoint's first-run setup; first success-path run)
+
+| Item | Value |
+|---|---|
+| Date (UTC) | 2026-10-10 08:24 |
+| Host / OS | `aitesting`, Ubuntu **24.04.5** (indicative only; target is 22.04) |
+| Installer code | `fix/use-needs-setup-gate` (on top of `feat/smtp-mail-transport`), uncommitted when run |
+| PinPoint commit | `22d05dc` (`esfen14/Pinpoint` `main`), which already has `Needs_Setup` and `complete-setup` |
+| VM state before | No PinPoint database (fresh for the installer), Nagios already installed from earlier runs |
+
+**Runner summary: PASS 37, FAIL 1, WARN 0, SKIP 5.**
+
+| IDs | Status | Detail |
+|---|---|---|
+| A12, F6 | PASS | Scripts parse; no carriage returns. |
+| A3 | PASS | Fresh install completed and reported the first-run setup requirement. |
+| A4 | PASS | One user, `admin-xxxxx@pinpoint.lan`, `Needs_Setup=1`. |
+| A5, A6 | PASS | Credentials file `root:root 600`, placeholder shown, wording asks for a real email and a new password. |
+| A7 | PASS | Generated password is not in the log or console output. |
+| **P1** | **FAIL, then PASS on re-run** | See finding 1. |
+| B1-B5 | PASS | Gate on at first sign-in; protected endpoint 403 with a first-run message; placeholder and `.lan` refused; wrong current password, mismatch, weak and unchanged password all 400. |
+| B6, B7 | PASS | `complete-setup` returned 200; `needs_setup` cleared; protected endpoint 200; placeholder login 401; new login 200. |
+| B9 | PASS | `nagios -v` passes. |
+| A10, A11 | PASS | Re-running the deploy took the upgrade path, created no administrator, left users and the credentials file unchanged. |
+| C1-C7, D1, D2, D4-D13, D15 | PASS | Mail transport and helper, as in Run 4 (D15: 72 user/password pairs). |
+| B8, B10, E1, E3, E8 | SKIP | See below. |
+
+### Findings
+1. **P1 failed in the run: apt lock.** `configure-pinpoint-privileges.sh` stopped at step 2/9
+   (`Could not install nmap`) because the VM's `unattended-upgrades` held
+   `/var/lib/dpkg/lock-frontend`. This is an environment race, not a defect in the new code, but
+   the same race could hit a real first boot. I waited for the lock to clear and ran the script
+   again by hand: **it passed all 9 steps**, including the new mail step and its checks. That
+   re-run was not part of the runner's count above. Possible hardening (not done):
+   `apt-get -o DPkg::Lock::Timeout=...` in the installer scripts.
+2. **B6 reported the Nagios contact was not updated.** The response said
+   `config_applied: false`. Cause: P1 had failed, so PinPoint did not yet own `hosts.cfg`
+   (it was still the 41-byte placeholder owned by `nagios`). This is the expected result of
+   running the web app before the privileges script, not a PinPoint or installer bug, and it
+   confirms the order matters: `configure-pinpoint-privileges.sh` must run before the first
+   `complete-setup`. On a real first boot the order is correct (`deploy` then `privileges`) and
+   the operator completes setup much later.
+3. **B8 verified by hand, not by the runner.** After the privileges script succeeded, I ran
+   PinPoint's `regenerate_and_apply_config_status()` as the `pinpoint` account. It returned
+   `applied`, `hosts.cfg` then contained a `define contact` with `pinpoint.tester@example.com`,
+   no `pinpoint.lan` remained, and `nagios -v` reported 0 errors and 0 warnings. This shows
+   the permissions work; it is not the same as completing setup after P1 on a fresh install.
+4. **Runner wait-loop typo (test tooling only).** My monitoring loop first used a wrong
+   `pgrep` pattern and reported the run finished early. The run itself was not affected.
+
+### Not covered
+- **A fully clean run in one go.** Because of finding 1 the runner never saw P1 pass or B8 run
+  in the same pass. That needs the snapshot restored and the runner started again (the apt lock
+  usually clears a few minutes after boot).
+- **A1, A2, A8, A9, B10**: no old PinPoint, failing `init-production`, or unwritable `hosts.cfg` was
+  set up.
+- **Ubuntu 22.04.**
+- **A Nagios-triggered alert (E8) and recovery (E9)**, the PinPoint SMTP settings API, and the
+  Settings card (they do not exist yet).
+- The browser screen itself (`FirstRunSetup`) was not driven; only its API was.
+
+---
+
+## Run 6 (starttls only)
+
+| Item | Value |
+|---|---|
+| Date (UTC) | 2026-10-10 08:43 |
+| Host / OS | `aitesting`, Ubuntu **24.04.5** (indicative only; target is 22.04) |
+| Installer code | `fix/use-needs-setup-gate`, uncommitted when run |
+| PinPoint commit | `5f511ba` (`esfen14/Pinpoint` `main`; the upgrade test pulled it) |
+| VM state | Installed system (setup completed in Run 5), so A3-A7, P1 and B1-B9 are skipped |
+
+Change under test: the helper accepts `tls: "starttls"` only; `none` and `ssl` are refused.
+
+**Runner summary: PASS 24, FAIL 0, WARN 0, SKIP 19.** D5 now also rejects `ssl`. All C and D cases
+pass again, including D15 (72 user/password pairs). A10/A11 passed: the upgrade took the upgrade
+path, pulled the newer PinPoint, created no administrator and left users and credentials alone.
+The privileges script was also re-run first (second run on the same VM, exit 0), which covers
+re-run safety of the mail step (C11).
+
+Also sent by hand: a "Hello, adminraine" mail from `nagios` through `/bin/mail` and msmtp to
+Gmail was accepted (`250 2.0.0 OK`) with the earlier settings, and the config was wiped afterwards.
+
+Not covered: Ubuntu 22.04, a single clean run (snapshot restore), a Nagios-triggered alert.
