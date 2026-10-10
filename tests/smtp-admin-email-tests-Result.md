@@ -64,7 +64,7 @@ behaviour on an existing install. These need a PinPoint release with the new opt
 |---|---|
 | Date (UTC) | 2026-10-10 06:09 |
 | Host / OS | `aitesting`, Ubuntu **24.04.5** (indicative only; target is 22.04) |
-| Installer code | `feat/require-email-change` (`d9e1df5`) **plus** the uncommitted fix on `fix/first-install-rollback`. Merged copy on the VM, md5 `af7c5b27c99a9149d5320d6cd94e1d85`. |
+| Installer code | `feat/require-email-change` (`d9e1df5`) **plus** the fix `3426654` from `fix/first-install-rollback`. Merged copy on the VM, md5 `af7c5b27c99a9149d5320d6cd94e1d85`. |
 | PinPoint commit | `3b57205`, no `--require-email-change` (PINPOINT-OLD) |
 | VM state before | Leftover repo from the earlier failed install, no service, no database. This is the exact state the fix targets. |
 
