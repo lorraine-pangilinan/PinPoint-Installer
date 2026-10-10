@@ -535,10 +535,15 @@ echo "✓ Backend dependencies installed." | tee -a "$LOG"
 echo
 echo "[7/12] Building web interface..." | tee -a "$LOG"
 
+# A lockfile generated on another OS can lack this platform's
+# optional native bindings (npm/cli#4828), which breaks Vite's
+# bundler. npm install --no-save adds them without touching
+# package-lock.json, so the repository stays clean for upgrades.
 runuser -u "$APP_USER" -- bash -c "
     cd '$CLIENT_DIR'
     export HOME='$CLIENT_DIR' npm_config_cache='$CLIENT_DIR/.npm'
     npm ci --no-audit --no-fund
+    npm install --no-save --no-audit --no-fund
     npm run build
 " >> "$LOG" 2>&1 \
     || fail "Could not build the web interface."
