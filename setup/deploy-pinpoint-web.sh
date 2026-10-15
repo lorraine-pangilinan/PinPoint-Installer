@@ -403,10 +403,15 @@ echo "[2/12] Installing web packages..." | tee -a "$LOG"
 # Nginx is installed here rather than in install-packages.sh:
 # it starts on port 80 when installed, which only works after
 # configure-nagios.sh has moved Apache off that port.
-apt-get install -y nginx git curl ca-certificates >> "$LOG" 2>&1 \
+apt-get install -y nginx git curl ca-certificates logrotate >> "$LOG" 2>&1 \
     || fail "Could not install Nginx."
 
 echo "✓ Nginx installed." | tee -a "$LOG"
+
+# Runs for fresh installs and upgrades, preserving administrator log policies.
+bash "$SCRIPT_DIR/configure-log-retention.sh" >> "$LOG" 2>&1 \
+    || fail "Could not configure appliance log retention."
+
 
 # The web interface is built with Vite, which needs a newer
 # Node.js than Ubuntu provides.

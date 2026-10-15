@@ -107,3 +107,49 @@ Progress is logged to `/var/log/pinpoint-web.log`.
 Lorraine G. Pangilinan
 
 BSIT Capstone 2
+
+
+## Log retention (issue 124)
+
+Fresh installs and upgrades run `setup/configure-log-retention.sh` from the web
+deployment step. It installs `/etc/systemd/journald.conf.d/pinpoint.conf` with
+`SystemMaxUse=100M` (100 MiB) and `MaxRetentionSec=7day`, then restarts
+`systemd-journald`. These are host-wide persistent journal limits, including
+Gunicorn stdout/stderr. They are not per-service quotas. Journald rotates whole
+journal files; the active journal can temporarily exceed the target. Existing
+archives are not vacuumed destructively during installation. After sufficient
+rotation, inspect `journalctl --disk-usage`; allow an active-file margin when
+comparing usage with the target.
+
+Administrator settings take precedence: any active `SystemMaxUse` or
+`MaxRetentionSec` in the main journald configuration or another drop-in under
+`/etc`, `/run`, `/usr/local/lib` or `/usr/lib` makes the installer skip its defaults.
+If an administrator adds such a setting after installation, the next upgrade
+removes only the byte-identical installer defaults and restarts journald. An
+edited `pinpoint.conf` is always kept. An administrator policy can therefore
+choose different limits. No settings in administrator files are overwritten.
+
+The installer also installs `/etc/logrotate.d/pinpoint-installer` for
+`/var/log/pinpoint-*.log`: weekly, four archives, compression (delayed one cycle),
+missing/empty files skipped and `copytruncate` to support active installer file
+descriptors. `copytruncate` can lose lines written during its small copy/truncate
+window. Existing administrator-edited rotation rules are kept. Nagios continues
+to rotate its own `nagios.log`; this module does not alter Nagios configuration.
+
+The helper takes no command-line arguments and uses fixed system paths. It
+refuses symlinks at managed destinations and writes new files without clobbering
+concurrently created files. It never reads application secrets or accepts web
+request data. The root prefix in the sourced function is for isolated tests;
+the executable always uses system paths.
+
+Run isolated regression checks with:
+
+```sh
+python3 -m unittest discover -s tests -p test_log_retention.py
+bash -n setup/configure-log-retention.sh setup/deploy-pinpoint-web.sh
+```
+
+Release notes: upgrades add explicit appliance journal defaults and installer
+log rotation while retaining administrator policies. No application database
+migration, Nagios rotation change or additional application privilege is needed.
+Fresh-appliance and upgrade disk-usage evidence must accompany release sign-off.
