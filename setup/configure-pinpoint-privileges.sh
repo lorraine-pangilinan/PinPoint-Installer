@@ -736,6 +736,31 @@ fi
 echo "✓ NCPA deployment key ready." | tee -a "$LOG"
 
 ##################################################
+# Restricted resource block writer
+##################################################
+
+# The application cannot preserve nagios-owned metadata when replacing
+# resource.cfg as pinpoint. Install a standalone root-owned block writer;
+# the caller supplies no chosen destination, commands or ownership values.
+RESOURCE_HELPER="/usr/local/sbin/pinpoint-apply-resources"
+RESOURCE_SOURCE="$(cd "$(dirname "$0")" && pwd)/pinpoint-apply-resources.py"
+RESOURCE_SUDOERS="/etc/sudoers.d/pinpoint-apply-resources"
+[ -f "$RESOURCE_SOURCE" ] || fail "Resource helper source is missing."
+install -m 755 -o root -g root "$RESOURCE_SOURCE" "$RESOURCE_HELPER"
+RESOURCE_SUDOERS_TMP="$(mktemp)"
+cat > "$RESOURCE_SUDOERS_TMP" <<EOF
+# Managed by PinPoint Installer. Fixed resource destination, managed block only.
+$APP_USER ALL=(root) NOPASSWD: $RESOURCE_HELPER ""
+EOF
+if ! visudo -cf "$RESOURCE_SUDOERS_TMP" >> "$LOG" 2>&1; then
+    rm -f "$RESOURCE_SUDOERS_TMP"
+    fail "Generated resource sudoers rule is invalid."
+fi
+install -m 440 -o root -g root "$RESOURCE_SUDOERS_TMP" "$RESOURCE_SUDOERS"
+rm -f "$RESOURCE_SUDOERS_TMP"
+echo "✓ Restricted resource block helper installed." | tee -a "$LOG"
+
+##################################################
 # Footer
 ##################################################
 
