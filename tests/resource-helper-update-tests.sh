@@ -56,6 +56,7 @@ as_pinpoint() {
 request() {
     python3 -I - "$HELPER" "$CFG" "${1:-}" <<'PY'
 import importlib.machinery, importlib.util, json, sys
+sys.dont_write_bytecode = True  # no __pycache__ next to the root-owned helper
 loader = importlib.machinery.SourceFileLoader('h', sys.argv[1])
 spec = importlib.util.spec_from_loader('h', loader)
 h = importlib.util.module_from_spec(spec)

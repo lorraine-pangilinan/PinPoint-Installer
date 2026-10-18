@@ -117,6 +117,7 @@ fi
 noop_request() {
     python3 -I - "$RESOURCE_HELPER" "$RESOURCE_CFG" <<'PY'
 import importlib.machinery, importlib.util, json, sys
+sys.dont_write_bytecode = True  # no __pycache__ next to the root-owned helper
 loader = importlib.machinery.SourceFileLoader('resource_helper', sys.argv[1])
 spec = importlib.util.spec_from_loader('resource_helper', loader)
 helper = importlib.util.module_from_spec(spec)
