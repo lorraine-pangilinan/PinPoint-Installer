@@ -40,6 +40,8 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 LOG="/var/log/pinpoint-privileges.log"
 
 # Set explicitly: SUDO_USER/USER resolve to root at first boot.
@@ -734,6 +736,16 @@ if ! runuser -u "$APP_USER" -- test -r "$NCPA_KEY"; then
 fi
 
 echo "✓ NCPA deployment key ready." | tee -a "$LOG"
+
+##################################################
+# Restricted resource block writer
+##################################################
+
+# Also called by web-only upgrades before Gunicorn starts. Keep one install
+# implementation so neither path can silently omit this application dependency.
+bash "$SCRIPT_DIR/install-resource-helper.sh" >> "$LOG" 2>&1 \
+    || fail "Could not install the restricted Nagios resource helper."
+echo "✓ Restricted resource block helper installed." | tee -a "$LOG"
 
 ##################################################
 # Footer

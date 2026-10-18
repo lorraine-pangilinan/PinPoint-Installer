@@ -90,6 +90,10 @@ how to check a server.
 
 ## Updating Network-Diagnosis-System
 
+The restricted [resource secret writer](docs/Resource-Secrets.md) preserves
+Nagios ownership during managed block updates. Fresh installs and web-only
+upgrades install the helper and its exact sudoers rule before the application starts.
+
 To update the PinPoint web interface on an installed server, run the deploy
 script as root. It pulls the latest `main` of
 [Network-Diagnosis-System](https://github.com/esfen14/Network-Diagnosis-System),
@@ -99,6 +103,14 @@ the built web interface are backed up first and restored if the update fails.
 ```bash
 sudo bash /root/pinpoint/deploy-pinpoint-web.sh
 ```
+
+Refresh the **complete `setup/` directory** in `/root/pinpoint/` from this installer
+release first. Copying only `deploy-pinpoint-web.sh` from a newer release omits
+required companion files; the deploy script now refuses that incomplete upgrade.
+For an existing installation affected by a missing resource helper, the narrow
+repair is `sudo bash /root/pinpoint/install-resource-helper.sh` after copying its
+Python companion alongside it. Retry the plugin/configuration action afterwards.
+See [resource helper setup and tests](docs/Resource-Secrets.md).
 
 Progress is logged to `/var/log/pinpoint-web.log`.
 

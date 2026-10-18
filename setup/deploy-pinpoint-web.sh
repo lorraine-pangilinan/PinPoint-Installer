@@ -386,6 +386,13 @@ if ! curl -fsS -o /dev/null --max-time 20 https://github.com; then
     fail "Cannot reach github.com. Check the gateway and DNS settings."
 fi
 
+# An application-only script copied from an old ISO must not deploy a newer app
+# without its privileged dependency. Stop before updating packages or application.
+for COMPANION in install-resource-helper.sh pinpoint-apply-resources.py; do
+    [ -f "$SCRIPT_DIR/$COMPANION" ] \
+        || fail "Missing $COMPANION. Update the complete installer setup directory before upgrading."
+done
+
 echo "✓ Nagios, Apache and network are ready." | tee -a "$LOG"
 
 # check_interval is in minutes only when interval_length is 60.
@@ -869,6 +876,11 @@ echo "[10/12] Configuring Gunicorn..." | tee -a "$LOG"
 # --no-control-socket: Gunicorn would otherwise create
 # ~/.gunicorn in /opt/pinpoint, which pinpoint cannot
 # write. The service is managed with systemctl instead.
+# Web-only upgrades do not run configure-pinpoint-privileges.sh afterwards.
+# Provision this dependency before starting the new application/scheduler.
+bash "$SCRIPT_DIR/install-resource-helper.sh" >> "$LOG" 2>&1 \
+    || fail "Could not install the restricted Nagios resource helper."
+
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=PinPoint Web Application (Gunicorn)

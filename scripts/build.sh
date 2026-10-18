@@ -31,6 +31,7 @@ mkdir -p "$PINPOINT_DIR"
 echo "Copying setup modules..."
 
 cp "$PROJECT/setup/"*.sh "$PINPOINT_DIR/"
+cp "$PROJECT/setup/pinpoint-apply-resources.py" "$PINPOINT_DIR/"
 
 echo "Copying first boot files..."
 

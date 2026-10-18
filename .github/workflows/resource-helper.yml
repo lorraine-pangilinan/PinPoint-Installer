@@ -1,0 +1,15 @@
+name: Resource helper contracts
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  resource-helper:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Isolated helper and upgrade-path tests
+        run: python3 -m unittest discover -s tests -p 'test_resource*.py'
+      - name: Shell syntax
+        run: bash -n setup/install-resource-helper.sh setup/configure-pinpoint-privileges.sh setup/deploy-pinpoint-web.sh scripts/build.sh tests/resource-helper-vm-tests.sh
+      - name: Whitespace
+        run: git diff --check
