@@ -61,6 +61,38 @@ class ResourceHelperTest(unittest.TestCase):
             with self.assertRaises(self.helper.Rejected): self.helper.apply(request)
             self.assertEqual(self.config.read_text(), self.outside)
 
+    def test_custom_check_field_names_allow_digits_dots_hyphens_and_case(self):
+        for field in ['api_key', 'api_key2', 'api-key', 'Api.Key', 'x_1.2-3']:
+            block = ('# BEGIN PINPOINT
+# PINPOINT KEY "custom_check:7:%s" $USER3$
+'
+                     '$USER3$=synthetic
+# END PINPOINT
+' % field)
+            self.helper.apply(self.payload(block))
+            self.assertEqual(self.config.read_text(), self.outside + block)
+
+    def test_custom_check_field_names_cannot_carry_unsafe_characters(self):
+        for field in ['', 'a b', 'a/b', 'a;b', 'a$b', 'a"b', 'a\nb', 'a:b']:
+            block = ('# BEGIN PINPOINT
+# PINPOINT KEY %s $USER3$
+$USER3$=synthetic
+# END PINPOINT
+'
+                     % json.dumps('custom_check:7:' + field))
+            with self.assertRaises(self.helper.Rejected): self.helper.apply(self.payload(block))
+            self.assertEqual(self.config.read_text(), self.outside)
+
+    def test_ncpa_token_and_custom_check_keys_must_have_numeric_ids(self):
+        for key in ['ncpa_token:abc', 'ncpa_token:', 'custom_check:x:field', 'other:1']:
+            block = ('# BEGIN PINPOINT
+# PINPOINT KEY %s $USER3$
+$USER3$=synthetic
+# END PINPOINT
+'
+                     % json.dumps(key))
+            with self.assertRaises(self.helper.Rejected): self.helper.apply(self.payload(block))
+
     def test_external_slot_collision_and_unsafe_permissions_are_rejected(self):
         self.config.write_text(self.outside + '$USER2$=external\n')
         with self.assertRaises(self.helper.Rejected): self.helper.apply(self.payload())

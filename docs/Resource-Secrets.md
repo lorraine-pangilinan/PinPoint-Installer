@@ -23,6 +23,31 @@ by the application group. A root-owned `/run/pinpoint-resource.lock` serializes
 helper requests; the application must also hold its shared config lock through
 generation, validation and apply/rollback. Errors contain no request content.
 
+
+## Installing and updating
+
+`setup/install-resource-helper.sh` installs the helper (`root:root 0755`) and
+the sudoers rule `/etc/sudoers.d/pinpoint-apply-resources` (`root:root 0440`).
+It is idempotent and is run by both `configure-pinpoint-privileges.sh` (new
+installs) and `deploy-pinpoint-web.sh` (every install and upgrade), before the
+application restarts. A server installed before the helper existed therefore
+gets it when it is updated with the deploy script. If the helper cannot be
+installed, the deploy script stops with an error and an in-progress upgrade is
+rolled back.
+
+After installing, the script tests the grant as `pinpoint`: `sudo -n -l` lists
+the exact rule (and refuses extra arguments and any other command), a no-op
+request (the unchanged block) is accepted, and a request with a wrong digest is
+refused. Request contents are never printed. The helper itself still prints one
+fixed line on any failure.
+
+Custom-check key comments accept `custom_check:<id>:<field>` where the field
+matches `[A-Za-z0-9_.-]+`, because the application does not restrict field names.
+
+On a Linux test VM, `tests/resource-helper-update-tests.sh` removes the helper,
+runs the deploy script twice and checks installation, idempotence, ordering and
+the helper's accept/reject behaviour.
+
 Isolated checks (no sudo or installed config changes):
 
 ```bash

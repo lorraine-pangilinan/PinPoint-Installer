@@ -65,7 +65,7 @@ def validate_block(block, outside):
         match = re.fullmatch(r'# PINPOINT KEY (.+) \$USER([0-9]+)\$', line)
         if not match: raise Rejected()
         key, slot = json.loads(match[1]), int(match[2])
-        if not isinstance(key, str) or not re.fullmatch(r'(?:ncpa_token:[0-9]+|custom_check:[0-9]+:[a-z_]+)', key): raise Rejected()
+        if not isinstance(key, str) or not re.fullmatch(r'(?:ncpa_token:[0-9]+|custom_check:[0-9]+:[A-Za-z0-9_.-]+)', key): raise Rejected()
         if key in keys or slot in metadata or not 2 <= slot <= 256: raise Rejected()
         keys.add(key); metadata.add(slot)
     if not metadata <= slots: raise Rejected()
