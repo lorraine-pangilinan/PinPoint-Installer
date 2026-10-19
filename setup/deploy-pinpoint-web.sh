@@ -855,6 +855,21 @@ db_check_interval_ok \
 echo "✓ Nagios check interval setting is present and valid." | tee -a "$LOG"
 
 ##################################################
+# Resource helper (before the application restarts)
+##################################################
+
+# The application writes NCPA tokens into resource.cfg through
+# /usr/local/sbin/pinpoint-apply-resources. A server installed before
+# that helper existed only gets it here, so it is installed (idempotently)
+# and tested before Gunicorn restarts. A failure stops the run, and during an
+# upgrade the backup is restored, instead of leaving the new application
+# running without it.
+echo
+echo "Installing the resource helper..." | tee -a "$LOG"
+
+RESOURCE_HELPER_LOG="$LOG" bash "$SCRIPT_DIR/install-resource-helper.sh"     || fail "Could not install the resource helper. NCPA deployment would fail."
+
+##################################################
 # [10/12] Configure Gunicorn
 ##################################################
 

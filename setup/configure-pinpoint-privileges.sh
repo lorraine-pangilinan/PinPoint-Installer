@@ -736,6 +736,18 @@ fi
 echo "✓ NCPA deployment key ready." | tee -a "$LOG"
 
 ##################################################
+# Restricted resource block writer
+##################################################
+
+# The application cannot preserve nagios-owned metadata when replacing
+# resource.cfg as pinpoint. A standalone root-owned block writer is installed by
+# install-resource-helper.sh, which deploy-pinpoint-web.sh also runs on every
+# upgrade; it checks the grant and a no-op request itself.
+RESOURCE_HELPER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/install-resource-helper.sh"
+[ -f "$RESOURCE_HELPER_SCRIPT" ] || fail "Resource helper installer is missing."
+RESOURCE_HELPER_LOG="$LOG" bash "$RESOURCE_HELPER_SCRIPT" || fail "Resource helper installation failed."
+
+##################################################
 # Footer
 ##################################################
 

@@ -7,3 +7,5 @@
 autoinstall/user-data*         text eol=lf
 autoinstall/meta-data          text eol=lf
 firstboot/*.before-*           text eol=lf
+
+*.py                           text eol=lf

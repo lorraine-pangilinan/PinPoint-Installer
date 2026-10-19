@@ -90,6 +90,10 @@ how to check a server.
 
 ## Updating Network-Diagnosis-System
 
+The restricted [resource secret writer](docs/Resource-Secrets.md) preserves
+Nagios ownership during managed block updates. Its application integration and
+installed update/rollback acceptance are still pending on the issue #129 branch.
+
 To update the PinPoint web interface on an installed server, run the deploy
 script as root. It pulls the latest `main` of
 [Network-Diagnosis-System](https://github.com/esfen14/Network-Diagnosis-System),
