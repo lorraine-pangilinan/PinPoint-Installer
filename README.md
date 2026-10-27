@@ -109,7 +109,7 @@ the menu opens once at the first console login, after the web credentials. On an
 appliance, install it with `sudo bash /root/pinpoint/configure-monitoring-updates.sh`; no
 menu opens by itself there. Other commands: `sudo pinpoint-update status [--json]` and
 `sudo pinpoint-update audit --verify`. The full design is in
-`docs/University-Maintenance-and-Updates-Plan.md` (branch `docs/nagios-update-management`).
+`docs/University-Maintenance-and-Updates-Plan.md`.
 
 ## Updating Network-Diagnosis-System
 
