@@ -74,6 +74,7 @@ case "$OPTION" in
         "configure-pinpoint-privileges.sh"
         "configure-event-handler.sh"
         "configure-journald-logs.sh"
+        "configure-monitoring-updates.sh"
     )
 
     TOTAL=${#MODULES[@]}

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- New installer module `configure-monitoring-updates.sh` (first boot step 10/10) installs the
+  read-only PinPoint Update Manager as `/usr/local/sbin/pinpoint-update` (`root:root`, `755`), the
+  baseline manifest in `/etc/pinpoint/updates/manifests/`, and its state in
+  `/var/lib/pinpoint/updates/updates.db` (`root:root`, `600`; folder `700`) with a hash-chained audit
+  log. `sudo pinpoint-update` shows the numbered menu (1 Reload, 2 Install updates, 3 Choose what to
+  update, 4 Exit); nothing is installed or downloaded yet, and Reload reports the update status as
+  UNKNOWN because no catalog exists. On a fresh install only (install credentials still pending),
+  `/var/lib/pinpoint/update-menu-pending` makes `pinpoint-login-hook.sh` open the menu once at the
+  first console login, after the credentials. Safe to run again on an existing appliance, where no
+  menu opens by itself. Tests: `tests/test_pinpoint_update.py`, `tests/login-hook-tests.sh`.
+
 - Nagios downloads are now checked. Nagios Core, the Nagios Plugins and `check_ncpa.py` are read
   from the baseline manifest `setup/manifests/pp-mon-baseline-1.json` (version, HTTPS URL, SHA-256),
   through the new `setup/baseline-artifacts.sh`. A cached archive is reused only if its SHA-256

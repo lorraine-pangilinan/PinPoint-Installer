@@ -32,7 +32,7 @@
       "build_profile": "plugins-source-v1"
     },
     "check-ncpa": {
-      "version": "1.2.5",
+      "version": "1.2.4",
       "artifact": {
         "url": "https://assets.nagios.com/downloads/ncpa/check_ncpa.tar.gz",
         "file": "check_ncpa.tar.gz",
@@ -49,7 +49,7 @@
     "known_limitations": [
       "Existing installer pins. Not yet qualified through the staging acceptance process.",
       "PinPoint ref is the unpinned main branch until the application is pinned to a tag.",
-      "check_ncpa archive CHANGES.rst says 1.2.5; check_ncpa.py itself reports 1.2.4.",
+      "check_ncpa version is what check_ncpa.py --version reports (1.2.4); the archive CHANGES.rst says 1.2.5.",
       "Digests recorded from the official HTTPS downloads on 2026-10-27; not yet signed."
     ]
   },
