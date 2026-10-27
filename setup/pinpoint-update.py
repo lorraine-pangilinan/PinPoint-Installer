@@ -44,6 +44,19 @@ CREATE TABLE IF NOT EXISTS audit (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL,
   event TEXT NOT NULL, txn_id TEXT, manifest_id TEXT, detail_json TEXT NOT NULL,
   prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS txn (
+  txn_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('update', 'drill')),
+  host_id TEXT NOT NULL, source_manifest_id TEXT NOT NULL, target_manifest_id TEXT NOT NULL,
+  approval_id TEXT, state TEXT NOT NULL, step TEXT, recovery_point_id TEXT, failure_code TEXT,
+  recovery_status TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+  downtime_seconds INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_txn ON txn(host_id)
+  WHERE state NOT IN ('succeeded', 'rolled_back', 'failed', 'recovery_failed', 'cancelled',
+                      'missed_window', 'blocked');
+CREATE TABLE IF NOT EXISTS recovery_point (
+  rp_id TEXT PRIMARY KEY, txn_id TEXT NOT NULL, kind TEXT NOT NULL, location TEXT NOT NULL,
+  file_manifest_sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL, created_at TEXT NOT NULL,
+  verified_at TEXT, restore_tested TEXT, retain_until TEXT);
 """
 
 
@@ -181,10 +194,10 @@ class Store:
     def close(self):
         self.db.close()
 
-    def audit(self, event, detail, manifest_id=None, txn_id=None):
+    def audit(self, event, detail, manifest_id=None, txn_id=None, who=None):
         row = self.db.execute('SELECT hash FROM audit ORDER BY seq DESC LIMIT 1').fetchone()
         prev = row[0] if row else '0' * 64
-        at, who = now(), actor()
+        at, who = now(), who or actor()
         body = json.dumps(detail, sort_keys=True, separators=(',', ':'))
         canonical = json.dumps([prev, at, who, event, txn_id, manifest_id, body], separators=(',', ':'))
         digest = hashlib.sha256(canonical.encode()).hexdigest()

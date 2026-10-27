@@ -355,6 +355,20 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 ##################################################
+# Update Lock
+##################################################
+
+# Shared with pinpoint-update-exec, so the web app is never
+# redeployed while Nagios is being changed or restored.
+UPDATE_LOCK="/run/lock/pinpoint-update.lock"
+
+exec 9> "$UPDATE_LOCK"
+
+if ! flock -n 9; then
+    fail "A Nagios update or recovery drill is running (pinpoint-update-exec). Run this again when it has finished."
+fi
+
+##################################################
 # Header
 ##################################################
 

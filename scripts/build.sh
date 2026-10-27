@@ -33,6 +33,7 @@ echo "Copying setup modules..."
 cp "$PROJECT/setup/"*.sh "$PINPOINT_DIR/"
 cp "$PROJECT/setup/pinpoint-apply-resources.py" "$PINPOINT_DIR/"
 cp "$PROJECT/setup/pinpoint-update.py" "$PINPOINT_DIR/"
+cp "$PROJECT/setup/pinpoint-update-exec.py" "$PINPOINT_DIR/"
 
 # Baseline manifest: versions and SHA-256 of Nagios Core,
 # the plugins and check_ncpa, read by the install modules.

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Recovery foundation for Nagios updates (plan Phase 2). Nothing is updated yet, but a change to
+  Nagios can now be undone. `configure-monitoring-updates.sh` also installs
+  `/usr/local/sbin/pinpoint-update-exec` (`root:root`, `755`), the health suite in
+  `/usr/local/lib/pinpoint-update/` (`pinpoint-update-health.sh`, checks HC-01 to HC-13, with a copy
+  of `pinpoint-healthcheck.sh`), the recovery point folder `/usr/local/.pinpoint-rp/` (`root:root`,
+  `700`, same filesystem as `/usr/local/nagios`) and two boot units,
+  `pinpoint-update-reconcile.service` (restores the files of an interrupted change before Nagios
+  starts) and `pinpoint-update-reconcile-finish.service` (runs the health suite once the services are
+  up). A recovery point is a copy of `/usr/local/nagios`, `nagios.service` and the Apache Nagios site
+  with a SHA-256, owner and mode list, verified before it is trusted; restoring is a rename swap,
+  each step recorded so it can be repeated after a crash. `sudo pinpoint-update-exec drill --yes`
+  runs the whole recovery path on a staging appliance and reports the time it took;
+  `--inject config|service|plugin|corrupt` and `--crash-after-apply` add the failure cases FI-06 to
+  FI-11. The drill stops Nagios and PinPoint web for a few minutes. `deploy-pinpoint-web.sh` now
+  takes the update lock `/run/lock/pinpoint-update.lock` and refuses to run while a drill or update
+  holds it. The update database gains the `txn` and `recovery_point` tables. Tests:
+  `tests/test_pinpoint_update_exec.py` (any machine), `tests/update-recovery-tests.sh` (VM).
+
 - New installer module `configure-monitoring-updates.sh` (first boot step 10/10) installs the
   read-only PinPoint Update Manager as `/usr/local/sbin/pinpoint-update` (`root:root`, `755`), the
   baseline manifest in `/etc/pinpoint/updates/manifests/`, and its state in

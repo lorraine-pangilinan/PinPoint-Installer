@@ -163,7 +163,7 @@ flowchart TB
     FETCH --> INC[("incoming/<br/>owned by pinpoint-updater, untrusted")]
     INC -->|"verify signature and SHA-256"| STORE[("trusted store<br/>root only")]
     CTL <--> DB[("updates.db<br/>root only")]
-    CTL -->|"systemctl start, TXN ID only"| EXEC["pinpoint-update-exec<br/>root, PrivateNetwork=yes"]
+    CTL -->|"systemctl start, TXN ID only"| EXEC["pinpoint-update-exec<br/>root, localhost only"]
     EXEC <--> DB
     EXEC --> STORE
     EXEC --> NAG["Nagios tree and units"]
@@ -179,8 +179,8 @@ flowchart TB
 |---|---|---|---|
 | `pinpoint-update` (controller, menu, CLI) | root through sudo; checks the caller's role itself | Menu, discovery scheduling, verify signatures and digests, compatibility gate, approvals, scheduling, notices, audit, history | Install files; run downloaded code; accept URLs or paths from the user |
 | fetch step (`pinpoint-update fetch`) | `pinpoint-updater` (unprivileged) | Download catalog, signatures and tarballs over HTTPS into `incoming/` | Write to the trusted store or database |
-| `pinpoint-update-exec` (privileged executor) | root, only as a systemd unit, `PrivateNetwork=yes` | Preflight, recovery point, build (dropping to `pinpoint-updater`), cutover, health checks, rollback, reconcile | Use the network; accept anything except a transaction ID |
-| `pinpoint-update-reconcile.service` | root, at boot, before `nagios.service` | Finish any interrupted transaction, always toward the previous version | Retry a forward update |
+| `pinpoint-update-exec` (privileged executor) | root, only as a systemd unit, network limited to localhost (`IPAddressDeny=any`, `IPAddressAllow=localhost`) | Preflight, recovery point, build (dropping to `pinpoint-updater`), cutover, health checks, rollback, reconcile | Reach anything beyond 127.0.0.1; accept anything except a transaction ID |
+| `pinpoint-update-reconcile.service` and `-finish.service` | root, at boot: the first before `nagios.service` (files only), the second after the services start (health suite) | Finish any interrupted transaction, always toward the previous version | Retry a forward update; start or stop services at boot |
 | `pinpoint-update-notify` | root through one exact sudoers rule | Render a stored notice and send it with msmtp | Read arguments other than a notice ID; print the SMTP password |
 | Health suite (`pinpoint-update-health`) | root | Versioned critical and warning checks (§13.1) | Change the system |
 
@@ -233,9 +233,10 @@ systemd units (all proposed):
 | Unit | Type | Purpose |
 |---|---|---|
 | `pinpoint-update-check.timer` / `.service` | daily, `RandomizedDelaySec=1h` | Discovery and notices |
-| `pinpoint-update-exec@<txn>.service` | oneshot, `PrivateNetwork=yes` | Runs one transaction |
+| `pinpoint-update-exec@<txn>.service` | oneshot, `IPAddressDeny=any`, `IPAddressAllow=localhost` | Runs one transaction |
 | `pinpoint-update-run.timer` | every 5 minutes | Starts approved transactions whose window has opened |
-| `pinpoint-update-reconcile.service` | oneshot, `Before=nagios.service pinpoint-gunicorn.service` | Reconcile after reboot |
+| `pinpoint-update-reconcile.service` | oneshot, `Before=nagios.service apache2.service pinpoint-gunicorn.service` | Restores files of an interrupted change at boot |
+| `pinpoint-update-reconcile-finish.service` | oneshot, `After=nagios.service apache2.service pinpoint-gunicorn.service nginx.service` | Runs the health suite after a boot-time restore |
 
 Sudoers (proposed, exact paths, no wildcards in the command path):
 
@@ -548,6 +549,14 @@ on boot (before nagios.service):
 Every restore step is written so that running it twice gives the same result. Each sub-step is
 recorded in `txn.step` before and after it runs.
 
+At boot the work is split over two units. A unit ordered before `nagios.service` must not start or
+stop Nagios (starting it would wait for the unit's own end; stopping it would cancel the boot start).
+So `pinpoint-update-reconcile.service` (`reconcile --boot`) only puts the files back and records the
+step `restore.files-restored`; `pinpoint-update-reconcile-finish.service` (`reconcile --finish`) runs
+after the services have started, runs the health suite and marks the transaction `RolledBack` or
+`RecoveryFailed`. Run by hand (`pinpoint-update-exec reconcile`), both parts happen in one go.
+(Built in Phase 2: branch `feat/nagios-recovery-foundation`.)
+
 ---
 
 ## 8. Admin menu, CLI and contract
@@ -841,7 +850,7 @@ while unresolved; marked sent only when msmtp accepts it; retries with backoff; 
 sequenceDiagram
     participant A as Admin (menu)
     participant C as Controller (root)
-    participant X as Executor (root, no network)
+    participant X as Executor (root, localhost only)
     participant N as Nagios and PinPoint web
     A->>C: 2 Install updates, 1 Install now, types manifest ID
     C->>C: check role, gate, record approval (user, digest, host, source, expiry)
@@ -936,6 +945,14 @@ and the authoritative copy after services stop, just before files change.
 
 **Gate:** production updates stay disabled until a staging restore drill passes (Phase 2 exit, §16).
 
+**Restore drill (built in Phase 2).** `sudo pinpoint-update-exec drill --yes` runs the whole recovery
+path on a staging appliance without installing anything: preflight and baseline health, stop PinPoint
+web and Nagios, create and verify the recovery point, start, health checks, restore, health checks on
+the restored version. It prints and audits how long the recovery point, the restore and the whole
+outage took. `--inject config|service|plugin|corrupt` adds the faults FI-06, FI-07, FI-08 and FI-11
+after the recovery point; `--crash-after-apply` stops as if the executor were killed (FI-09) or the
+power failed (FI-10, followed by a reboot). The VM runner is `tests/update-recovery-tests.sh`.
+
 ### 11.3 Migration classes
 
 Every manifest declares a `migration_class`:
@@ -975,7 +992,7 @@ measures actual restore time so the agreed number is realistic.
 | Keys | Release key held by `<PLACEHOLDER custodian>`, offline or on a hardware token, not on any appliance or personal account. Keyring may hold two keys during rotation. Revocation through signed `revoked.json`, and a new keyring shipped with the next installer and updater release |
 | Allowlist | `updater.conf` lists allowed hosts (for example `assets.nagios.com`, `nagios-plugins.org`, `<PLACEHOLDER catalog host>`, optional `<PLACEHOLDER mirror>`) |
 | Extraction | Python `tarfile` with the `data` filter (or equivalent checks): no absolute paths, no `..`, no links outside the target, no device files, size limits |
-| Least privilege | Downloads and builds run as `pinpoint-updater`; executor has no network; notify helper takes only an ID |
+| Least privilege | Downloads and builds run as `pinpoint-updater`; executor reaches only 127.0.0.1 (the health suite reads the Nagios CGIs there); notify helper takes only an ID |
 | Authorisation | Role check in the program, not in the UI; approval bound to manifest digest, host and source state |
 | Approval lifetime | Default expiry `<PLACEHOLDER 14 days>`; revoked by manifest revocation, drift or state change |
 | Input | Strict regex for IDs; dates parsed strictly; reasons are data; no `shell=True`; argument lists only |
@@ -1014,10 +1031,22 @@ before it is built. Until then, the normal process applies.
 | HC-08 | `check_ncpa.py` runs as `nagios` and its hash matches the manifest | critical |
 | HC-09 | Event spool writable by `nagios`, readable by `pinpoint` | critical |
 | HC-10 | `sudo -l -U pinpoint` matches the expected rules | critical |
-| HC-11 | `pinpoint-gunicorn` active; existing `pinpoint-healthcheck.sh` exit 0 | critical |
+| HC-11 | `pinpoint-gunicorn` active; existing `pinpoint-healthcheck.sh` reports no failure that it did not report before the change | critical |
 | HC-12 | Ownership and modes of files in §2.2 table match | critical |
 | HC-13 | No new `Error:` lines in `nagios.log` since start | warning |
 | HC-14 | Recovery point still verifies | critical (before commit) |
+
+HC-11 differs from a plain "exit 0" because `pinpoint-healthcheck.sh` already fails one check on a
+current appliance: it treats the installer's `systemctl restart nagios` sudo rule
+(`setup/configure-pinpoint-privileges.sh:74`) as too broad (`setup/pinpoint-healthcheck.sh:848-850`).
+Until that check is corrected, the suite records the failures seen before the change and fails HC-11
+only on new ones. The executor needs localhost because HC-05, HC-06 and HC-11 read the CGIs and the
+web app on 127.0.0.1; a `PrivateNetwork=yes` sandbox has its own loopback and would make them fail.
+
+The suite is `setup/pinpoint-update-health.sh` (installed in `/usr/local/lib/pinpoint-update/`):
+`--save DIR` records the healthy state before a change; `--compare DIR --target-version X.Y.Z` checks
+the system against it. It prints `ID|LEVEL|STATUS|note` per check and exits with the number of failed
+critical checks. HC-14 is checked by `pinpoint-update-exec verify`.
 
 ### 13.2 Test layers
 
