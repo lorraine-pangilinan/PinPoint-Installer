@@ -224,7 +224,8 @@ HTTPS and subprocess are in the standard library; signatures use `gpgv`.
 | Recovery points | `/usr/local/.pinpoint-rp/<rp-id>/` (same filesystem as `/usr/local/nagios`) | `root:root 700` |
 | Lock | `/run/lock/pinpoint-update.lock` (`flock`) | shared with `deploy-pinpoint-web.sh` |
 | Log | `/var/log/pinpoint-update.log` | added to `/etc/logrotate.d/pinpoint` |
-| First-menu marker | `/var/lib/pinpoint/updates/first-menu-shown` | `root:root 644` |
+| Bundled baseline manifest | `/etc/pinpoint/updates/manifests/` | `root:root 755`, files `644` |
+| First-login menu marker | `/var/lib/pinpoint/update-menu-pending` (outside the root-only state folder, so the login hook can see it) | `root:root 644` |
 | Sudoers | `/etc/sudoers.d/pinpoint-update` | `root:root 440`, validated with `visudo -cf` |
 
 systemd units (all proposed):
@@ -748,10 +749,12 @@ Steps and where they change existing code:
    `installer-baseline` (running the installer is the approval of the bundled baseline).
 5. **Discover.** A bounded check (30 seconds total) runs before first boot prints its completion
    message. Failure never blocks the install.
-6. **Menu once.** `setup/pinpoint-login-hook.sh` gains a second step: after the credentials notice,
-   if `/var/lib/pinpoint/updates/first-menu-shown` does not exist, write it and run
-   `sudo /usr/local/sbin/pinpoint-update --first-login`. The marker is written when the menu is
-   **shown**, so a dropped session cannot make it reappear on every login.
+6. **Menu once.** `configure-monitoring-updates.sh` creates `/var/lib/pinpoint/update-menu-pending`
+   only when the install credentials are still pending (`/var/lib/pinpoint/web-credentials-pending`),
+   which is true on a fresh install and never on an existing appliance. After the credentials are
+   confirmed, `setup/pinpoint-login-hook.sh` runs `sudo /usr/local/sbin/pinpoint-update --first-login`.
+   The program removes the marker **before** showing the menu, so a dropped session cannot make it
+   reappear on every login. (Built in milestone 1: commit `e290123` on `feat/verified-nagios-baseline`.)
 7. **Later logins** show one line: `Updates: none` or `Updates: N verified available - run sudo
    pinpoint-update`.
 8. **No email at first install.** The admin's real address exists only after PinPoint's web setup, so
