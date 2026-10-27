@@ -9,7 +9,9 @@ SNMP, or web server setup.
 
 - Ubuntu Server 22.04.5 LTS
 - Nagios Core 4.5.11
-- Official Nagios Plugins
+- Official Nagios Plugins 2.4.12 and the NCPA `check_ncpa.py` plugin
+  (versions and SHA-256 fixed in `setup/manifests/pp-mon-baseline-1.json`; a download that does not
+  match is refused)
 - SNMP
 - PinPoint Management System (Network-Diagnosis-System web interface, served by Nginx and Gunicorn)
 

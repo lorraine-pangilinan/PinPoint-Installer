@@ -3,12 +3,20 @@
 ##################################################
 # PinPoint Installer Module
 # Module: install-nagios-core.sh
-# Purpose: Download, compile, and install Nagios Core
+# Purpose: Download (SHA-256 checked against the
+#          baseline manifest), compile, and install
+#          Nagios Core
 ##################################################
 
 set -e
 
 LOG="/var/log/pinpoint-nagios.log"
+
+# Version, URL and SHA-256 come from the bundled baseline
+# manifest (manifests/pp-mon-baseline-1.json).
+source "$(dirname "$0")/baseline-artifacts.sh"
+NAGIOS_VERSION="$(baseline_field nagios-core version)"
+NAGIOS_FOLDER="nagios-${NAGIOS_VERSION}"
 
 ##################################################
 # Root Check
@@ -45,11 +53,7 @@ cd /usr/local/src
 echo
 echo "[2/8] Downloading Nagios Core..." | tee -a "$LOG"
 
-if [ ! -f nagios-4.5.11.tar.gz ]; then
-    wget https://assets.nagios.com/downloads/nagioscore/releases/nagios-4.5.11.tar.gz
-else
-    echo "✓ Nagios archive already exists." | tee -a "$LOG"
-fi
+fetch_verified_artifact nagios-core
 
 ##################################################
 # [3/8] Extract Nagios Core
@@ -58,10 +62,10 @@ fi
 echo
 echo "[3/8] Extracting Nagios Core..." | tee -a "$LOG"
 
-rm -rf nagios-4.5.11
-tar -xzf nagios-4.5.11.tar.gz
+rm -rf "$NAGIOS_FOLDER"
+tar -xzf "$(baseline_field nagios-core artifact.file)"
 
-cd nagios-4.5.11
+cd "$NAGIOS_FOLDER"
 
 echo "✓ Source extracted successfully." | tee -a "$LOG"
 

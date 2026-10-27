@@ -18,6 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 LOG="/var/log/pinpoint-configure.log"
 
+source "$SCRIPT_DIR/baseline-artifacts.sh"
+NAGIOS_VERSION="$(baseline_field nagios-core version)"
+
 NAGIOS_BIND="127.0.0.1:8081"
 NAGIOS_URL="http://$NAGIOS_BIND/nagios"
 
@@ -71,7 +74,8 @@ echo "✓ Nagios Core found." | tee -a "$LOG"
 echo
 echo "[2/8] Installing Nagios configuration..." | tee -a "$LOG"
 
-cd /usr/local/src/nagios-4.5.11
+# Source tree left by install-nagios-core.sh.
+cd "/usr/local/src/nagios-$NAGIOS_VERSION"
 
 make install-config
 

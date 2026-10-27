@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "manifest_id": "pp-mon-baseline-1",
+  "published_at": "2026-10-27T00:00:00Z",
+  "publisher": "PinPoint installer (development team)",
+  "pinpoint": {
+    "repo": "esfen14/Network-Diagnosis-System",
+    "ref": "main"
+  },
+  "platform": {
+    "os": "ubuntu",
+    "version": "22.04",
+    "arch": "x86_64"
+  },
+  "components": {
+    "nagios-core": {
+      "version": "4.5.11",
+      "artifact": {
+        "url": "https://assets.nagios.com/downloads/nagioscore/releases/nagios-4.5.11.tar.gz",
+        "file": "nagios-4.5.11.tar.gz",
+        "sha256": "1bf85d6704a75e6b89a09844836f68b1cfc61ab1ef005574041e36e73fdb797a"
+      },
+      "build_profile": "core-source-v1"
+    },
+    "nagios-plugins": {
+      "version": "2.4.12",
+      "artifact": {
+        "url": "https://nagios-plugins.org/download/nagios-plugins-2.4.12.tar.gz",
+        "file": "nagios-plugins-2.4.12.tar.gz",
+        "sha256": "9a246245d8270f15759763160c48df5dcdc2af9632733a5238930fde6778b578"
+      },
+      "build_profile": "plugins-source-v1"
+    },
+    "check-ncpa": {
+      "version": "1.2.5",
+      "artifact": {
+        "url": "https://assets.nagios.com/downloads/ncpa/check_ncpa.tar.gz",
+        "file": "check_ncpa.tar.gz",
+        "sha256": "05ea975942fda38d1de6b224a339ce18959abe1bce73ac9c26fdee624f778cec"
+      },
+      "build_profile": "ncpa-client-v1"
+    }
+  },
+  "upgrade_from": [],
+  "migration_class": "binary-only",
+  "compatibility": {
+    "state": "conditional",
+    "evidence_ids": [],
+    "known_limitations": [
+      "Existing installer pins. Not yet qualified through the staging acceptance process.",
+      "PinPoint ref is the unpinned main branch until the application is pinned to a tag.",
+      "check_ncpa archive CHANGES.rst says 1.2.5; check_ncpa.py itself reports 1.2.4.",
+      "Digests recorded from the official HTTPS downloads on 2026-10-27; not yet signed."
+    ]
+  },
+  "security": {
+    "advisories": [],
+    "priority": "normal"
+  }
+}

@@ -4,22 +4,25 @@
 # PinPoint Installer Module
 # Module : install-nagios-plugins.sh
 # Purpose: Download, compile and install
-#          Nagios Plugins 2.4.12 (incl. check_mysql)
-#          and the NCPA check_ncpa.py plugin
+#          Nagios Plugins (incl. check_mysql) and the
+#          NCPA check_ncpa.py plugin, at the versions
+#          and SHA-256 in the baseline manifest
 ##################################################
 
 set -e
 
 LOG="/var/log/pinpoint-plugins.log"
 
-PLUGIN_VERSION="2.4.12"
-PLUGIN_ARCHIVE="nagios-plugins-${PLUGIN_VERSION}.tar.gz"
+# Versions, URLs and SHA-256 come from the bundled baseline
+# manifest (manifests/pp-mon-baseline-1.json).
+source "$(dirname "$0")/baseline-artifacts.sh"
+
+PLUGIN_VERSION="$(baseline_field nagios-plugins version)"
+PLUGIN_ARCHIVE="$(baseline_field nagios-plugins artifact.file)"
 PLUGIN_FOLDER="nagios-plugins-${PLUGIN_VERSION}"
-DOWNLOAD_URL="https://nagios-plugins.org/download/${PLUGIN_ARCHIVE}"
 
 LIBEXEC="/usr/local/nagios/libexec"
-NCPA_ARCHIVE="check_ncpa.tar.gz"
-NCPA_URL="https://assets.nagios.com/downloads/ncpa/${NCPA_ARCHIVE}"
+NCPA_ARCHIVE="$(baseline_field check-ncpa artifact.file)"
 
 ########################################
 # Root Check
@@ -55,12 +58,7 @@ cd /usr/local/src
 echo
 echo "[2/8] Downloading Nagios Plugins..." | tee -a "$LOG"
 
-if [ ! -f "$PLUGIN_ARCHIVE" ]; then
-    wget "$DOWNLOAD_URL"
-    echo "✓ Download completed." | tee -a "$LOG"
-else
-    echo "✓ Archive already exists." | tee -a "$LOG"
-fi
+fetch_verified_artifact nagios-plugins
 
 ########################################
 # [3/8] Extract Source
@@ -124,9 +122,11 @@ echo "[7/8] Installing NCPA plugin..." | tee -a "$LOG"
 
 cd /usr/local/src
 
-# Always fetch the current release (not pinned)
-rm -rf "$NCPA_ARCHIVE" check_ncpa
-wget -O "$NCPA_ARCHIVE" "$NCPA_URL"
+# Pinned by SHA-256 in the baseline manifest. The upstream
+# URL always serves the latest release, so a changed archive
+# fails here instead of being installed untested.
+rm -rf check_ncpa
+fetch_verified_artifact check-ncpa
 
 mkdir -p check_ncpa
 tar -xzf "$NCPA_ARCHIVE" -C check_ncpa

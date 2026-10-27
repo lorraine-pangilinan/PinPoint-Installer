@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Nagios downloads are now checked. Nagios Core, the Nagios Plugins and `check_ncpa.py` are read
+  from the baseline manifest `setup/manifests/pp-mon-baseline-1.json` (version, HTTPS URL, SHA-256),
+  through the new `setup/baseline-artifacts.sh`. A cached archive is reused only if its SHA-256
+  matches; a download that does not match is deleted and the install stops before building.
+  `check_ncpa.py` is no longer fetched unpinned: if upstream replaces the archive, the install stops
+  until the manifest is updated. `configure-nagios.sh` takes the Nagios source folder from the
+  manifest instead of a hard-coded path. `scripts/build.sh` copies the manifest onto the ISO.
+  Tests: `tests/baseline-artifacts-tests.sh` (runs on any machine).
+
 - PinPoint can now restart `nagios` automatically (proactive resolution, `restart_local_service`).
   The installer adds `/etc/sudoers.d/pinpoint-restart` (`root:root`, `0440`) with one rule:
   `pinpoint ALL=(root) NOPASSWD: /usr/bin/systemctl restart nagios`. No other unit, no wildcards, no
