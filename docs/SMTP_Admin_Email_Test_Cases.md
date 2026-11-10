@@ -67,7 +67,7 @@ Run against the real API through Nginx (`/api/user/login`, `/api/user/me`,
 | C5 | Sudoers valid | `visudo -c` and `cat /etc/sudoers.d/pinpoint-apply-smtp` | Valid. One rule: `pinpoint` may run only that helper, `NOPASSWD`. | |
 | C6 | Rights are narrow | As `pinpoint`: `sudo -n -l /usr/local/sbin/pinpoint-apply-smtp`, then `sudo -n -l /bin/cat` | First is allowed. Second is refused. | |
 | C7 | Flask cannot write `/etc` | As `pinpoint`: `touch /etc/msmtprc` | Permission denied. | |
-| C8 | Nagios reload rule intact | `sudo -n -l /usr/bin/systemctl reload nagios` as `pinpoint`, and `restart nagios` | Reload allowed, restart refused (existing behaviour). | |
+| C8 | Nagios reload rule intact | `sudo -n -l /usr/bin/systemctl reload nagios` as `pinpoint`, and `restart nagios` | Both allowed. `restart sshd` and `restart nagios extra` are refused. | |
 | C9 | Mail command resolves | `grep -n 'by-email' /usr/local/nagios/etc/objects/commands.cfg` shows the commands call `/bin/mail`. Then, as `nagios`: `test -x /bin/mail`. | `/bin/mail` exists and `nagios` can run it. No change to `commands.cfg` is needed. | |
 | C10 | msmtp is the transport | `readlink -f $(command -v sendmail)` | Points to msmtp. | |
 | C11 | Script is idempotent | Run `configure-pinpoint-privileges.sh` twice | Second run succeeds. No duplicate sudoers lines, `/etc/msmtprc` content is not wiped. | |
@@ -84,7 +84,8 @@ Feed it on stdin. Run as `pinpoint` through sudo.
 | D4 | Bad port | Port `0`, `70000`, `abc` | Non-zero exit, short message, file unchanged. | |
 | D5 | Bad TLS mode | `none` (never allowed: the login is always sent), `ssl`, or any value other than `starttls` | Non-zero exit, file unchanged. | |
 | D6 | Newline injection | Host or user containing `\n` followed by extra msmtp directives | Rejected, file unchanged, no extra directive written. | |
-| D7 | Control characters and shell syntax | Tab, ``, ``, DEL and non-ASCII in `username`/`password`; `$(...)` in the password | Control and non-ASCII rejected. `$(...)` is written literally inside quotes. Nothing executes. | |
+| D7 | Control characters and shell syntax | Tab, `
+`, ``, DEL and non-ASCII in `username`/`password`; `$(...)` in the password | Control and non-ASCII rejected. `$(...)` is written literally inside quotes. Nothing executes. | |
 | D8 | Missing field | Empty host or empty password | Non-zero exit, file unchanged. | |
 | D9 | Oversized input | Several MB on stdin | Rejected quickly. | |
 | D10 | No arguments accepted | Pass the settings as arguments | Ignored or refused. Never read from the command line. | |

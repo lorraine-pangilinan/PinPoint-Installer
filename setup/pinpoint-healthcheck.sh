@@ -506,8 +506,26 @@ else
     fail "$APP_USER cannot run 'sudo systemctl reload nagios'."
 fi
 
+# PinPoint may reload and restart Nagios (proactive resolution, rule in
+# /etc/sudoers.d/pinpoint-restart) and nothing else.
 if runuser -u "$APP_USER" -- sudo -n -l /usr/bin/systemctl restart nagios > /dev/null 2>&1; then
-    fail "$APP_USER has sudo rights beyond 'systemctl reload nagios'."
+    pass "$APP_USER can restart Nagios through sudo."
+else
+    fail "$APP_USER cannot run 'sudo systemctl restart nagios'."
+fi
+
+for ACTION in stop start; do
+    if runuser -u "$APP_USER" -- sudo -n -l /usr/bin/systemctl "$ACTION" nagios > /dev/null 2>&1; then
+        fail "$APP_USER has sudo rights beyond reload and restart of nagios ($ACTION is allowed)."
+    fi
+done
+
+if runuser -u "$APP_USER" -- sudo -n -l /usr/bin/systemctl restart sshd > /dev/null 2>&1; then
+    fail "$APP_USER may restart units other than nagios (sshd is allowed)."
+fi
+
+if runuser -u "$APP_USER" -- sudo -n -l /usr/bin/systemctl restart nagios extra > /dev/null 2>&1; then
+    fail "$APP_USER may pass extra arguments to 'systemctl restart nagios'."
 fi
 
 if runuser -u "$APP_USER" -- test -r "$NCPA_KEY"; then
