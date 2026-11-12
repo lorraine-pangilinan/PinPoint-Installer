@@ -252,8 +252,13 @@ if [ "$RC" -ne 0 ] && grep -q 'Nagios update or recovery drill is running' /root
 else
     record R16 FAIL "deploy-pinpoint-web.sh exit $RC while the lock is held. See /root/update-recovery-R16.txt"
 fi
+# flock runs sleep as a child that keeps the lock open, so stop it
+# too, then wait until the lock is really free before the next case.
+pkill -P "$HOLDER" 2> /dev/null
 kill "$HOLDER" 2> /dev/null
 wait "$HOLDER" 2> /dev/null
+flock -w 30 "$LOCK" true \
+    || record R17a FAIL "FI-13 lock still held 30 s after stopping the holder"
 check R17 "PinPoint web still running after the refused deploy" systemctl is-active --quiet pinpoint-gunicorn
 
 ##################################################
