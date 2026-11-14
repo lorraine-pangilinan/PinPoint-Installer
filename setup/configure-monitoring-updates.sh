@@ -211,6 +211,9 @@ After=nagios.service apache2.service pinpoint-gunicorn.service nginx.service
 [Service]
 Type=oneshot
 ExecStart=$EXEC reconcile --finish
+# Exit 10 means the boot-time restore worked and Nagios is back on
+# the previous version, which is a success for this unit.
+SuccessExitStatus=10
 TimeoutStartSec=1800
 
 [Install]
