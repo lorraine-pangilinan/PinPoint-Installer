@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "manifest_id": "pp-mon-2026.11-1",
+  "published_at": "2026-11-14T00:00:00Z",
+  "publisher": "PinPoint installer (development team)",
+  "pinpoint": {
+    "repo": "esfen14/Network-Diagnosis-System",
+    "ref": "main"
+  },
+  "platform": {
+    "os": "ubuntu",
+    "version": "22.04",
+    "arch": "x86_64"
+  },
+  "components": {
+    "nagios-core": {
+      "version": "4.5.14",
+      "artifact": {
+        "url": "https://assets.nagios.com/downloads/nagioscore/releases/nagios-4.5.14.tar.gz",
+        "file": "nagios-4.5.14.tar.gz",
+        "sha256": "dce59f306577789c56d2748471d4c3856ecba8572d6b0811cf79f9de2f9afabb"
+      },
+      "build_profile": "core-source-v1"
+    },
+    "nagios-plugins": {
+      "version": "2.4.12",
+      "artifact": {
+        "url": "https://nagios-plugins.org/download/nagios-plugins-2.4.12.tar.gz",
+        "file": "nagios-plugins-2.4.12.tar.gz",
+        "sha256": "9a246245d8270f15759763160c48df5dcdc2af9632733a5238930fde6778b578"
+      },
+      "build_profile": "plugins-source-v1"
+    },
+    "check-ncpa": {
+      "version": "1.2.4",
+      "artifact": {
+        "url": "https://assets.nagios.com/downloads/ncpa/check_ncpa.tar.gz",
+        "file": "check_ncpa.tar.gz",
+        "sha256": "05ea975942fda38d1de6b224a339ce18959abe1bce73ac9c26fdee624f778cec"
+      },
+      "build_profile": "ncpa-client-v1"
+    }
+  },
+  "upgrade_from": ["pp-mon-baseline-1"],
+  "migration_class": "binary-only",
+  "expected_downtime_minutes": 10,
+  "release_notes_url": "https://github.com/NagiosEnterprises/nagioscore/blob/nagios-4.5.14/Changelog",
+  "compatibility": {
+    "state": "conditional",
+    "evidence_ids": [],
+    "known_limitations": [
+      "Nagios Core only (4.5.11 -> 4.5.14); Plugins and check_ncpa are unchanged.",
+      "Tested on the staging VM only (tests/update-install-vm-Result.md); not yet approved by university IT.",
+      "4.5.13 and 4.5.14 change CSRF cookie handling in cmd.cgi; PinPoint reads Nagios through the JSON CGIs, but any use of cmd.cgi must be checked.",
+      "4.5.14 sanitizes notification macros; check that alert emails still look right after the update.",
+      "Same SHA-256 from assets.nagios.com and the GitHub release (checked 2026-11-14)."
+    ]
+  },
+  "security": {
+    "advisories": [
+      "Nagios Core 4.5.12: CSRF cookie fixes",
+      "Nagios Core 4.5.13: CSRF cookie and custom variable sanitization fixes",
+      "Nagios Core 4.5.14: notification macro, jsonquery.js, cmd.cgi XSS and CSRF fixes"
+    ],
+    "priority": "high"
+  }
+}

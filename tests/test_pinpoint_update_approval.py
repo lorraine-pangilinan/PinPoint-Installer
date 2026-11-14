@@ -42,6 +42,10 @@ class ApprovalTest(unittest.TestCase):
         pu.LOG = root / 'pinpoint-update.log'
         pu.JOURNAL = None
         pu.APP_DIR = root / 'app'
+        pu.LOGIN_NOTICE = root / 'update-notice'
+        pu.UPDATER_CONF = root / 'updater.conf'
+        pu.OBJECTS_CACHE = root / 'objects.cache'
+        pu.AUTO_UPGRADES = root / '20auto-upgrades'
         self.host = 'test-host'
         pu.host_id = lambda: self.host
         self.untrusted = set()

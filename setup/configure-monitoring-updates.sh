@@ -3,12 +3,13 @@
 ##################################################
 # PinPoint Installer Module
 # Module : configure-monitoring-updates.sh
-# Purpose: Install the PinPoint Update Manager
-#          (approvals only; it installs no update
-#          yet), its recovery executor and health
-#          suite, its admin and viewer groups, and
-#          the baseline manifest, then record the
-#          installed Nagios versions.
+# Purpose: Install the PinPoint Update Manager, its
+#          update executor and health suite, its
+#          admin and viewer groups, the baseline
+#          manifest, the catalog check and run
+#          timers, then record the installed Nagios
+#          versions and make sure Ubuntu installs its
+#          own security updates.
 #
 # Installs:
 #   /usr/local/sbin/pinpoint-update (root:root 755)
@@ -23,6 +24,12 @@
 #   pinpoint-update-reconcile-finish.service, which
 #   finish an interrupted change at boot, toward
 #   the previous version
+#   pinpoint-update-exec@.service (one update each)
+#   pinpoint-update-discover.timer (daily catalog check)
+#   pinpoint-update-run.timer (scheduled windows)
+#   user pinpoint-updater and /var/lib/pinpoint/update-build/
+#   /etc/pinpoint/updates/updater.conf (catalog address)
+#   unattended-upgrades, on (Ubuntu security updates)
 #
 # Safe to run again on an existing appliance. Only on a
 # fresh install (install credentials not yet shown) is the
@@ -50,6 +57,11 @@ ADMINS="pinpoint-update-admins"
 VIEWERS="pinpoint-update-viewers"
 CREDENTIALS_MARKER="/var/lib/pinpoint/web-credentials-pending"
 MENU_PENDING="/var/lib/pinpoint/update-menu-pending"
+BUILDER="pinpoint-updater"
+BUILD_ROOT="/var/lib/pinpoint/update-build"
+UPDATER_CONF="/etc/pinpoint/updates/updater.conf"
+CATALOG_URL="https://raw.githubusercontent.com/lorraine-pangilinan/PinPoint-Installer/main/catalog/"
+AUTO_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
 
 fail() {
     echo "✗ $1" | tee -a "$LOG"
@@ -226,6 +238,141 @@ systemctl enable pinpoint-update-reconcile.service pinpoint-update-reconcile-fin
     || fail "Could not enable the reconcile services."
 
 echo "✓ Reconcile services enabled." | tee -a "$LOG"
+
+##################################################
+# Build user, update runner and timers
+##################################################
+
+echo
+echo "Installing the update runner, the build user and the timers..." | tee -a "$LOG"
+
+# Downloads are unpacked and compiled by this user, never by
+# root (plan 12.1). It cannot log in and owns nothing else.
+if ! id "$BUILDER" > /dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$BUILDER" \
+        || fail "Could not create the build user $BUILDER."
+fi
+install -d -o root -g root -m 0755 "$BUILD_ROOT"
+
+# Catalog address: the university's GitHub repository (decision
+# of 14 November 2026). Kept if it exists, so a site can point
+# to its own fork; only raw.githubusercontent.com is accepted.
+if [ ! -f "$UPDATER_CONF" ]; then
+    cat > "$UPDATER_CONF" <<EOF
+# PinPoint Update Manager settings. Root only.
+# Where the list of approved update sets is downloaded from.
+catalog_url = $CATALOG_URL
+# Optional: send update notices to these addresses instead of
+# the PinPoint users in Nagios (comma-separated).
+# notify_to = admin@university.edu
+EOF
+fi
+chown root:root "$UPDATER_CONF"
+chmod 0644 "$UPDATER_CONF"
+
+# One unit per update, so closing the SSH session never stops
+# an update that is running (plan 8.1).
+cat > "$UNIT_DIR/pinpoint-update-exec@.service" <<EOF
+[Unit]
+Description=PinPoint Update Manager: install update %i
+Wants=network-online.target
+After=network-online.target nagios.service
+
+[Service]
+Type=oneshot
+ExecStart=$EXEC run %i
+TimeoutStartSec=10800
+EOF
+
+# Daily catalog check. It only downloads the list and sends
+# notices; it never installs anything.
+cat > "$UNIT_DIR/pinpoint-update-discover.service" <<EOF
+[Unit]
+Description=PinPoint Update Manager: check the update catalog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$PROGRAM discover --quiet
+EOF
+
+cat > "$UNIT_DIR/pinpoint-update-discover.timer" <<EOF
+[Unit]
+Description=PinPoint Update Manager: daily catalog check
+
+[Timer]
+OnBootSec=15min
+OnCalendar=daily
+RandomizedDelaySec=4h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# Starts an update only when an admin approved it with a
+# maintenance window and that window has opened.
+cat > "$UNIT_DIR/pinpoint-update-run.service" <<EOF
+[Unit]
+Description=PinPoint Update Manager: run scheduled updates
+Wants=network-online.target
+After=network-online.target nagios.service
+
+[Service]
+Type=oneshot
+ExecStart=$EXEC run-due
+TimeoutStartSec=10800
+EOF
+
+cat > "$UNIT_DIR/pinpoint-update-run.timer" <<EOF
+[Unit]
+Description=PinPoint Update Manager: check every 5 minutes for an opened window
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*:0/5
+
+[Install]
+WantedBy=timers.target
+EOF
+
+chmod 644 "$UNIT_DIR"/pinpoint-update-exec@.service "$UNIT_DIR"/pinpoint-update-discover.* "$UNIT_DIR"/pinpoint-update-run.*
+systemctl daemon-reload
+systemctl enable --now pinpoint-update-discover.timer pinpoint-update-run.timer >> "$LOG" 2>&1 \
+    || fail "Could not enable the update timers."
+
+echo "✓ Build user $BUILDER, catalog $(grep '^catalog_url' "$UPDATER_CONF" | cut -d= -f2- | xargs)" | tee -a "$LOG"
+echo "✓ Timers enabled: daily catalog check, scheduled-window runner." | tee -a "$LOG"
+
+##################################################
+# Ubuntu security updates
+##################################################
+
+echo
+echo "Checking that Ubuntu installs its security updates..." | tee -a "$LOG"
+
+# nginx, Apache, Python, OpenSSL and the other Ubuntu packages
+# are updated and signature-checked by Ubuntu itself (plan
+# section 3). Make sure the daily security updates are on.
+if ! dpkg -s unattended-upgrades > /dev/null 2>&1; then
+    apt-get install -y unattended-upgrades >> "$LOG" 2>&1 \
+        || echo "  WARNING: unattended-upgrades could not be installed (offline?)." | tee -a "$LOG"
+fi
+
+if dpkg -s unattended-upgrades > /dev/null 2>&1; then
+    if ! grep -q 'Unattended-Upgrade "1"' "$AUTO_UPGRADES" 2> /dev/null \
+        || ! grep -q 'Update-Package-Lists "1"' "$AUTO_UPGRADES" 2> /dev/null; then
+        cat > "$AUTO_UPGRADES" <<EOF
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+        echo "  Daily Ubuntu security updates turned on." | tee -a "$LOG"
+    fi
+    echo "✓ Ubuntu security updates: automatic." | tee -a "$LOG"
+else
+    echo "  WARNING: Ubuntu security updates are NOT automatic on this appliance." | tee -a "$LOG"
+fi
 
 ##################################################
 # [7/7] First console login (fresh install only)

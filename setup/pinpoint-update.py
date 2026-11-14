@@ -1,22 +1,24 @@
 #!/usr/bin/python3 -I
-"""PinPoint Update Manager, Phase 3: validation and approval.
+"""PinPoint Update Manager: inventory, catalog, approval and notices.
 
 Scan the installed Nagios Core, Nagios Plugins and check_ncpa.py, compare them
-with the bundled baseline manifest, record the scan in a root-only SQLite
-database with a hash-chained audit log, and show the numbered console menu.
+with the installed manifest, record the scan in a root-only SQLite database
+with a hash-chained audit log, and show the numbered console menu.
 
 Manifests are read from the root-only folder /etc/pinpoint/updates/manifests/.
-Manifests are not signed (decision of 28 October 2026): a file there is trusted
-because only root can write it, and its SHA-256 is recorded the first time it
-is seen, so a later edit is refused. The compatibility gate decides whether a
-manifest may be installed on this host, and admins approve, defer or decline
-it from the command line. An approval is bound to the manifest digest, this
-host and the installed state, and is voided as soon as one of them changes.
+Manifests are not signed (decision of 28 October 2026). `discover` downloads
+new ones from the update catalog: a fixed HTTPS address in the university's
+GitHub repository (decision of 14 November 2026). The catalog's index.json
+lists every manifest with its SHA-256; a manifest is accepted only if its
+bytes match the index, and the whole download is refused if one file does
+not. A recorded manifest can never be replaced: a change needs a new ID.
 
-Nothing here installs, downloads or changes Nagios. An approval creates a
-transaction in the "approved" state; running it is a later phase. There is no
-update catalog yet, so Reload reports the update status as UNKNOWN rather than
-"up to date".
+The compatibility gate decides whether a manifest may be installed on this
+host, and admins approve, schedule, defer or decline it. An approval is bound
+to the manifest digest, this host and the installed state, and is voided as
+soon as one of them changes. The installation itself is done by
+pinpoint-update-exec, started as pinpoint-update-exec@<txn>.service or by the
+run timer when a scheduled window opens.
 """
 import argparse
 import datetime
@@ -45,7 +47,26 @@ JOURNAL = ('logger', '-t', 'pinpoint-update', '--')
 # Created by configure-monitoring-updates.sh on a fresh install only; the login
 # hook opens the menu once while it exists. World-readable folder, unlike STATE_DIR.
 MENU_PENDING = Path('/var/lib/pinpoint/update-menu-pending')
-CATALOG_URL = None  # No signed catalog exists yet (plan section 6.1).
+# Shown by the console login hook; world-readable, holds no secrets.
+LOGIN_NOTICE = Path('/var/lib/pinpoint/update-notice')
+UPDATER_CONF = Path('/etc/pinpoint/updates/updater.conf')
+CONF_KEYS = ('catalog_url', 'notify_to')
+# The update catalog (decision of 14 November 2026): only this host is accepted
+# for the catalog, and only the official download sites for the artifacts.
+DEFAULT_CATALOG_URL = 'https://raw.githubusercontent.com/lorraine-pangilinan/PinPoint-Installer/main/catalog/'
+CATALOG_HOSTS = ('raw.githubusercontent.com',)
+ARTIFACT_HOSTS = ('assets.nagios.com', 'nagios-plugins.org', 'github.com', 'objects.githubusercontent.com',
+                  'release-assets.githubusercontent.com')
+CATALOG_STATE = 'catalog.json'  # in STATE_DIR
+INDEX_LIMIT, MANIFEST_LIMIT = 256 << 10, 64 << 10
+STALE_DAYS = 7  # <PLACEHOLDER 7 days> in plan section 14
+# Recipients until the app export command exists (plan 10.1, source A).
+OBJECTS_CACHE = Path('/usr/local/nagios/var/objects.cache')
+RECIPIENT_GROUP = 'system_users'
+MAIL = '/bin/mail'
+MAX_SEND_ATTEMPTS = 10
+AUTO_UPGRADES = Path('/etc/apt/apt.conf.d/20auto-upgrades')
+EXEC_UNIT = 'pinpoint-update-exec@%s.service'
 COMPONENTS = (('nagios-core', 'Nagios Core'), ('nagios-plugins', 'Nagios Plugins'), ('check-ncpa', 'check_ncpa'))
 # Build recipes shipped in the updater code; a manifest can only name one (plan 6.1).
 BUILD_PROFILES = {'nagios-core': 'core-source-v1', 'nagios-plugins': 'plugins-source-v1',
@@ -54,7 +75,7 @@ COMPAT_STATES = ('verified', 'conditional', 'untested', 'incompatible', 'depreca
 INSTALLABLE = ('verified', 'conditional')
 MIGRATION_CLASSES = ('binary-only', 'config-compatible', 'config-migration', 'major')
 ADMINS, VIEWERS = 'pinpoint-update-admins', 'pinpoint-update-viewers'
-ADMIN_COMMANDS = ('approve', 'defer', 'decline', 'cancel')
+ADMIN_COMMANDS = ('approve', 'defer', 'decline', 'cancel', 'run')
 APPROVAL_DAYS = 14  # <PLACEHOLDER 14 days> in plan section 7.1
 DEFAULT_DOWNTIME = 15  # minutes, when a manifest does not say
 ID_PATTERN = r'[a-z0-9.-]{1,64}'
@@ -62,8 +83,10 @@ TXN_PATTERN = r'txn-[0-9]{14}-[0-9a-f]{6}'
 RUN_TIMEOUT = 15
 
 OK, INVALID_INPUT, NOT_AUTHORISED, BLOCKED, BUSY, INVALID_TRANSITION = 0, 2, 3, 4, 5, 6
+CATALOG_UNAVAILABLE = 7
 CODE_NAMES = {OK: 'OK', INVALID_INPUT: 'INVALID_INPUT', NOT_AUTHORISED: 'NOT_AUTHORISED', BLOCKED: 'BLOCKED',
-              BUSY: 'BUSY', INVALID_TRANSITION: 'INVALID_TRANSITION'}
+              BUSY: 'BUSY', INVALID_TRANSITION: 'INVALID_TRANSITION', CATALOG_UNAVAILABLE: 'CATALOG_UNAVAILABLE'}
+FINISHED = ('succeeded', 'rolled_back', 'failed', 'recovery_failed', 'cancelled', 'missed_window', 'blocked')
 
 ACTIVE = ('approved', 'preparing', 'staging', 'applying', 'health_check', 'rolling_back')
 # Plan section 7.1. preparing -> failed is only used by reconcile, for a
@@ -118,6 +141,12 @@ CREATE TABLE IF NOT EXISTS approval (
   reason TEXT, window_start TEXT, window_end TEXT, review_date TEXT, created_at TEXT NOT NULL,
   expires_at TEXT,
   status TEXT NOT NULL CHECK (status IN ('active', 'used', 'expired', 'revoked', 'superseded')));
+CREATE TABLE IF NOT EXISTS notice (
+  notice_id TEXT PRIMARY KEY, kind TEXT NOT NULL, manifest_id TEXT, txn_id TEXT,
+  subject TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL,
+  sent_at TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
+-- One notice per manifest and status change (plan 10.1, deduplication).
+CREATE UNIQUE INDEX IF NOT EXISTS notice_once ON notice(kind, IFNULL(manifest_id, ''), IFNULL(txn_id, ''));
 """
 
 
@@ -269,8 +298,10 @@ def trusted_file(path):
     return st.st_uid == 0 and not st.st_mode & 0o022
 
 
-def register_manifests(store):
+def register_manifests(store, catalog_ids=()):
     """Record every manifest in MANIFEST_DIR and apply revoked.json.
+
+    CATALOG_IDS are the manifests discover() just downloaded, recorded with source 'catalog'.
 
     Returns {file name: problem} for the files that were refused. A manifest
     whose bytes changed after it was recorded is refused: a change needs a new
@@ -301,7 +332,8 @@ def register_manifests(store):
                 store.db.execute('INSERT INTO manifest (manifest_id, schema_version, sha256, compat_state, source, '
                                  'body_json, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
                                  (mid, 1, digest, body['compatibility']['state'],
-                                  'bundled' if path.name == MANIFEST.name else 'local', raw.decode(), now()))
+                                  'bundled' if path.name == MANIFEST.name else
+                                  'catalog' if mid in catalog_ids else 'local', raw.decode(), now()))
                 store.audit('manifest.registered', {'sha256': digest, 'compat_state': body['compatibility']['state']},
                             mid)
         elif row[0] != digest:
@@ -330,12 +362,17 @@ def apply_revocations(store):
             text_field(mid, ID_PATTERN, 'manifest id')
     except (OSError, ValueError) as error:
         return {REVOKED: str(error) or type(error).__name__}
+    revoke(store, ids, 'revoked.json')
+    return {}
+
+
+def revoke(store, ids, source):
+    """Mark recorded manifests deprecated. A revocation is never undone."""
     for mid in ids:
         with store.db:
             if store.db.execute("UPDATE manifest SET compat_state = 'deprecated', revoked_at = ? "
                                 'WHERE manifest_id = ? AND revoked_at IS NULL', (now(), mid)).rowcount:
-                store.audit('manifest.revoked', {}, mid)
-    return {}
+                store.audit('manifest.revoked', {'source': source}, mid)
 
 
 def parse_core_version(text):
@@ -534,7 +571,7 @@ def transition(store, txn_id, to, who='executor', **fields):
 
 def inventory(store, manifest):
     found = scan()
-    rows = compare(found, manifest)
+    rows = compare(found, reference(store, manifest))
     store.record_scan(found, rows, manifest)
     return rows
 
@@ -652,8 +689,9 @@ def refresh(store, manifest):
     """Record manifests and a fresh inventory, then void what no longer holds. Returns refused files."""
     problems = register_manifests(store)
     found = scan()
-    store.record_scan(found, compare(found, manifest), manifest)
+    store.record_scan(found, compare(found, reference(store, manifest)), manifest)
     invalidate(store, found)
+    write_login_notice(store, found)
     return found, problems
 
 
@@ -782,15 +820,474 @@ def manifest_summary(store, record, found):
             'installable': not reasons, 'blocked_by': reasons, 'latest_decision': latest[0] if latest else None}
 
 
+def set_installed(store, manifest_id, txn_id):
+    """Commit step of an update (plan 10.2, step 15): the host now runs MANIFEST_ID."""
+    with store.db:
+        store.db.execute('UPDATE installed_state SET manifest_id = ?, since = ?, last_txn_id = ? WHERE host_id = ?',
+                         (manifest_id, now(), txn_id, host_id()))
+        store.audit('installed_state.changed', {'source': 'update'}, manifest_id, txn_id, who='executor')
+
+
+def reference(store, manifest):
+    """What the installed components should match: the installed manifest, or the baseline before one is recorded."""
+    installed = store.installed_manifest()
+    record = store.manifest(installed) if installed else None
+    return record['body'] if record else manifest
+
+
+##################################################
+# Update catalog (plan 10.1; trust decision of 14 November 2026)
+##################################################
+
+class CatalogError(Exception):
+    pass
+
+
+def read_conf():
+    """updater.conf: 'key = value' lines. Read only when root owns it and nobody else can write it."""
+    if not UPDATER_CONF.exists():
+        return {}
+    if not trusted_file(UPDATER_CONF):
+        raise CatalogError('%s is not owned by root, or is writable by others' % UPDATER_CONF)
+    conf = {}
+    for line in UPDATER_CONF.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        key, sep, value = line.partition('=')
+        key = key.strip()
+        if not sep or key not in CONF_KEYS:
+            raise CatalogError('%s: unknown line "%s"' % (UPDATER_CONF.name, line[:60]))
+        conf[key] = value.strip()
+    return conf
+
+
+def check_url(url, hosts):
+    """HTTPS to one of HOSTS, default port, no user name or password in the address."""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        raise CatalogError('not a valid address: %s' % url[:200])
+    if (parts.scheme != 'https' or parts.hostname not in hosts or port not in (None, 443)
+            or parts.username or parts.password or any(c.isspace() for c in url)):
+        raise CatalogError('not an allowed HTTPS address: %s' % url[:200])
+    return url
+
+
+def redirect_handler(hosts):
+    """A redirect is followed only to an allowed HTTPS address."""
+    import urllib.request
+
+    class Redirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            check_url(newurl, hosts)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    return Redirect()
+
+
+def http_get(url, limit, timeout, hosts):
+    """Download at most LIMIT bytes over HTTPS. Certificates are checked; a redirect must stay on HOSTS."""
+    import http.client
+    import urllib.error
+    import urllib.request
+
+    check_url(url, hosts)
+    opener = urllib.request.build_opener(redirect_handler(hosts))
+    request = urllib.request.Request(url, headers={'User-Agent': 'pinpoint-update'})
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            data = response.read(limit + 1)
+    except CatalogError:
+        raise
+    except urllib.error.HTTPError as error:
+        raise CatalogError('%s returned HTTP %d' % (url[:200], error.code))
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        reason = getattr(error, 'reason', None) or error
+        raise CatalogError('cannot download %s (%s)' % (url[:200], str(reason)[:120] or type(error).__name__))
+    if len(data) > limit:
+        raise CatalogError('%s is larger than %d bytes' % (url[:200], limit))
+    return data
+
+
+def catalog_base(conf):
+    url = conf.get('catalog_url') or DEFAULT_CATALOG_URL
+    if not url.endswith('/'):
+        raise CatalogError('catalog_url must end with "/"')
+    return check_url(url, CATALOG_HOSTS)
+
+
+def check_index(index):
+    """index.json: {"schema_version": 1, "manifests": [{"manifest_id", "sha256"}], "revoked": [ids]}."""
+    require(isinstance(index, dict) and index.get('schema_version') == 1, 'index.json: unsupported schema_version')
+    listed = index.get('manifests')
+    require(isinstance(listed, list) and len(listed) <= 500, 'index.json: manifests must be a list')
+    entries = []
+    for entry in listed:
+        require(isinstance(entry, dict), 'index.json: invalid entry')
+        entries.append((text_field(entry.get('manifest_id'), ID_PATTERN, 'index manifest_id'),
+                        text_field(entry.get('sha256'), r'[0-9a-f]{64}', 'index sha256')))
+    require(len({mid for mid, _ in entries}) == len(entries), 'index.json: a manifest is listed twice')
+    revoked = index.get('revoked', [])
+    require(isinstance(revoked, list), 'index.json: revoked must be a list')
+    for mid in revoked:
+        text_field(mid, ID_PATTERN, 'revoked manifest id')
+    return entries, revoked
+
+
+def catalog_state():
+    try:
+        return json.loads((Path(STATE_DIR) / CATALOG_STATE).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_catalog_state(state):
+    path = Path(STATE_DIR) / CATALOG_STATE
+    temp = path.with_name(path.name + '.tmp')
+    temp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    os.replace(str(temp), str(path))
+
+
+def write_manifest_file(mid, raw):
+    path = MANIFEST_DIR / (mid + '.json')
+    temp = MANIFEST_DIR / ('.%s.json.tmp' % mid)
+    temp.write_bytes(raw)
+    os.chmod(temp, 0o644)
+    os.replace(str(temp), str(path))
+
+
+def discover(store, fetch=None, timeout=30):
+    """Fetch the catalog and record new manifests. All or nothing: no partial catalog is trusted (plan 12.1).
+
+    Returns (ok, reason, new manifest IDs). Nothing in Nagios is changed.
+    """
+    fetch = fetch or http_get
+    state, new = catalog_state(), {}
+    try:
+        base = catalog_base(read_conf())
+        entries, revoked = check_index(json.loads(fetch(base + 'index.json', INDEX_LIMIT, timeout, CATALOG_HOSTS)))
+        for mid, digest in entries:
+            row = store.db.execute('SELECT sha256 FROM manifest WHERE manifest_id = ?', (mid,)).fetchone()
+            if row:
+                if row[0] != digest:
+                    raise CatalogError('the catalog lists %s with a different digest than the one recorded here; '
+                                       'a changed manifest needs a new ID' % mid)
+                continue
+            path = MANIFEST_DIR / (mid + '.json')
+            if path.exists() and sha256_file(path) == digest:
+                continue
+            raw = fetch(base + 'manifests/%s.json' % mid, MANIFEST_LIMIT, timeout, CATALOG_HOSTS)
+            if hashlib.sha256(raw).hexdigest() != digest:
+                raise CatalogError('%s does not match the SHA-256 in the catalog index' % mid)
+            body = check_manifest(json.loads(raw))
+            require(body['manifest_id'] == mid, '%s: manifest_id inside the file is %s' % (mid, body['manifest_id']))
+            new[mid] = raw
+        for mid, raw in new.items():
+            write_manifest_file(mid, raw)
+        revoke(store, [mid for mid in revoked if store.manifest(mid)], 'catalog')
+        problems = register_manifests(store, set(new))
+    except (CatalogError, ValueError, OSError, KeyError, TypeError) as error:
+        reason = (str(error) or type(error).__name__)[:300]
+        state.update(checked_at=now(), ok=False, error=reason)
+        save_catalog_state(state)
+        with store.db:
+            store.audit('catalog.failed', {'reason': reason})
+        return False, reason, []
+    stamp = now()
+    state.update(checked_at=stamp, ok=True, error=None, last_good=stamp, url=base)
+    save_catalog_state(state)
+    with store.db:
+        store.audit('catalog.checked', {'url': base, 'listed': len(entries), 'new': sorted(new),
+                                        'revoked': revoked, 'refused_files': problems})
+    return True, '', sorted(new)
+
+
+def offers(store, found):
+    """Recorded manifests this host may install now, newest first (plan 8.1, option 2)."""
+    items = []
+    for (mid,) in store.db.execute('SELECT manifest_id FROM manifest WHERE revoked_at IS NULL'):
+        if not gate(store, mid, found):
+            items.append(store.manifest(mid))
+    return sorted(items, key=lambda r: (r['body'].get('published_at', ''), r['manifest_id']), reverse=True)
+
+
+def age_days(stamp):
+    try:
+        moment = datetime.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+    return (datetime.datetime.now(datetime.timezone.utc) - moment).total_seconds() / 86400
+
+
+def catalog_status(store, found):
+    """One line for the menu, the banner and --json. Never 'up to date' without a good, recent check."""
+    state = catalog_state()
+    available = [r['manifest_id'] for r in offers(store, found)]
+    if not state.get('checked_at'):
+        line = 'UNKNOWN (the catalog has not been checked yet; choose 1 to reload)'
+    elif not state.get('ok'):
+        line = 'UNKNOWN (last check failed: %s; last good check: %s)' % (state.get('error'),
+                                                                       state.get('last_good') or 'never')
+    elif (age_days(state.get('last_good')) or 0) > STALE_DAYS:
+        line = 'UNKNOWN (last good check %s is more than %d days old)' % (state['last_good'], STALE_DAYS)
+    elif not available:
+        return 'Up to date (catalog checked %s)' % state['last_good']
+    else:
+        return 'Update available: %s' % ', '.join(available)
+    return line + ('; known update: %s' % ', '.join(available) if available else '')
+
+
+def auto_security_updates():
+    """'on', 'off' or 'unknown': whether Ubuntu installs its own security updates daily."""
+    try:
+        text = AUTO_UPGRADES.read_text()
+    except OSError:
+        return 'off'
+    values = dict(re.findall(r'APT::Periodic::([A-Za-z-]+)\s+"(\d+)"', text))
+    return 'on' if values.get('Update-Package-Lists') == '1' and values.get('Unattended-Upgrade') == '1' else 'off'
+
+
+##################################################
+# Notices (plan 10.1 and 14)
+##################################################
+
+EMAIL_PATTERN = r'[A-Za-z0-9._%+][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}'
+PLACEHOLDER_DOMAINS = ('example.com', 'example.org', 'example.net', 'localhost', 'invalid', 'test')
+
+
+def nagios_objects(path=None):
+    """Parse objects.cache into a list of (type, {directive: value}). Nagios writes it on every start."""
+    objects, current = [], None
+    for line in Path(path or OBJECTS_CACHE).read_text(encoding='utf-8', errors='replace').splitlines():
+        line = line.strip()
+        match = re.match(r'define\s+(\w+)\s*\{', line)
+        if match:
+            current = (match[1], {})
+        elif line == '}' and current:
+            objects.append(current)
+            current = None
+        elif current and line:
+            key, _, value = line.partition('\t') if '\t' in line else line.partition(' ')
+            current[1][key.strip()] = value.strip()
+    return objects
+
+
+def recipients(conf):
+    """Real admin addresses: the updater.conf override, else the Nagios system_users contacts (source A)."""
+    if conf.get('notify_to'):
+        candidates = [a.strip() for a in conf['notify_to'].split(',')]
+    else:
+        try:
+            objects = nagios_objects()
+        except OSError:
+            return []
+        members = set()
+        for kind, fields in objects:
+            if kind == 'contactgroup' and fields.get('contactgroup_name') == RECIPIENT_GROUP:
+                members.update(m.strip() for m in fields.get('members', '').split(',') if m.strip())
+        candidates = [fields.get('email', '') for kind, fields in objects
+                      if kind == 'contact' and fields.get('contact_name') in members]
+    good = set()
+    for address in candidates:
+        domain = address.rpartition('@')[2].lower()
+        if re.fullmatch(EMAIL_PATTERN, address) and not any(domain == d or domain.endswith('.' + d)
+                                                           for d in PLACEHOLDER_DOMAINS):
+            good.add(address)
+    return sorted(good)
+
+
+def send_mail(to, subject, body):
+    """Send through /bin/mail and msmtp, the transport the Nagios alerts use. Returns (ok, error)."""
+    try:
+        done = subprocess.run([MAIL, '-s', subject, *to], input=body, capture_output=True, text=True,
+                              timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, type(error).__name__
+    return done.returncode == 0, (done.stderr or done.stdout).strip()[:300] or None
+
+
+def queue_notice(store, kind, subject, body, manifest_id=None, txn_id=None):
+    """Store a notice once per kind, manifest and transaction. Returns True if it is new."""
+    with store.db:
+        added = store.db.execute('INSERT OR IGNORE INTO notice (notice_id, kind, manifest_id, txn_id, subject, body, '
+                                 'created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                                 (make_id('ntc'), kind, manifest_id, txn_id, subject[:200], body, now())).rowcount
+        if added:
+            store.audit('notice.queued', {'kind': kind}, manifest_id, txn_id, who='system')
+    return bool(added)
+
+
+def send_notices(store, sender=None):
+    """Send what is pending. Without a real address the notice stays pending and the banner shows it."""
+    pending = store.rows('SELECT * FROM notice WHERE sent_at IS NULL AND attempts < ? ORDER BY created_at, rowid',
+                         (MAX_SEND_ATTEMPTS,))
+    if not pending:
+        return 0
+    try:
+        to = recipients(read_conf())
+    except (CatalogError, OSError):
+        to = []
+    if not to:
+        return 0
+    sent = 0
+    for notice in pending:
+        ok, error = (sender or send_mail)(to, notice['subject'], notice['body'])
+        with store.db:
+            store.db.execute('UPDATE notice SET attempts = attempts + 1, sent_at = ?, last_error = ? '
+                             'WHERE notice_id = ?', (now() if ok else None, error if not ok else None,
+                                                     notice['notice_id']))
+            store.audit('notice.sent' if ok else 'notice.failed',
+                        {'kind': notice['kind'], 'recipients': len(to), **({} if ok else {'error': error})},
+                        notice['manifest_id'], notice['txn_id'], who='system')
+        sent += ok
+    return sent
+
+
+def subject(text):
+    return '[PinPoint %s] %s' % (socket.gethostname(), text)
+
+
+def versions_line(body):
+    return ', '.join('%s %s' % (label, body['components'][key]['version']) for key, label in COMPONENTS)
+
+
+def notice_available(store, record):
+    """Verified (or conditional) update available, plan 14. Not sent again for a deferred or declined set."""
+    body, installed = record['body'], store.manifest(store.installed_manifest() or '')
+    if decisions(store, record['manifest_id'], 'defer') or decisions(store, record['manifest_id'], 'decline'):
+        return False
+    compat = body['compatibility']
+    text = '\n'.join([
+        'Installed:  %s' % (versions_line(installed['body']) if installed else 'not recorded'),
+        'Proposed:   %s' % versions_line(body),
+        'Status:     %s on %s %s %s%s' % (record['compat_state'].upper(), body['platform']['os'],
+                                          body['platform']['version'], body['platform']['arch'],
+                                          ' (evidence %s)' % ', '.join(compat['evidence_ids'])
+                                          if compat.get('evidence_ids') else ''),
+        'Security:   %s' % (', '.join(body.get('security', {}).get('advisories', [])) or 'none listed'),
+        'Downtime:   about %d minutes (Nagios and PinPoint web stopped)'
+        % body.get('expected_downtime_minutes', DEFAULT_DOWNTIME),
+        'Recovery:   automatic rollback; recovery point verified before changes',
+        *(['Limit:      ' + item for item in compat.get('known_limitations', [])]),
+        *(['Notes:      ' + body['release_notes_url']] if body.get('release_notes_url') else []),
+        '',
+        'To review: sudo pinpoint-update   (option 2)',
+        'Nothing will be installed until an administrator approves it.'])
+    kind = 'Verified' if record['compat_state'] == 'verified' else 'Conditional'
+    return queue_notice(store, 'available', subject('%s Nagios update available: %s' % (kind, record['manifest_id'])),
+                        text + '\n', record['manifest_id'])
+
+
+def notice_result(store, txn_id):
+    """Successful, failed and rolled back, or recovery failed (CRITICAL), plan 14."""
+    rows = store.rows('SELECT * FROM txn WHERE txn_id = ?', (txn_id,))
+    if not rows or rows[0]['state'] not in ('succeeded', 'rolled_back', 'recovery_failed', 'failed', 'blocked'):
+        return False
+    t = rows[0]
+    title = {'succeeded': 'Nagios update installed: %s',
+             'rolled_back': 'Nagios update failed and was rolled back: %s',
+             'recovery_failed': 'CRITICAL: Nagios update failed and recovery failed: %s',
+             'failed': 'Nagios update stopped before any change: %s',
+             'blocked': 'Nagios update blocked by its checks: %s'}[t['state']] % t['target_manifest_id']
+    lines = ['Transaction: %s' % txn_id,
+             'From:        %s' % t['source_manifest_id'],
+             'To:          %s' % t['target_manifest_id'],
+             'Result:      %s' % t['state'],
+             'Reason:      %s' % (t['failure_code'] or '-'),
+             'Detail:      %s' % (t['recovery_status'] or '-'),
+             'Downtime:    %s' % ('%d s' % t['downtime_seconds'] if t['downtime_seconds'] is not None else '-')]
+    if t['state'] == 'recovery_failed':
+        lines += ['', 'Nothing more is done automatically. Monitoring may be down.',
+                  'Follow "When recovery fails" in the update runbook (docs/Update-Runbook.md).']
+    lines += ['', 'Details: sudo pinpoint-update history']
+    return queue_notice(store, t['state'], subject(title), '\n'.join(lines) + '\n', t['target_manifest_id'], txn_id)
+
+
+def write_login_notice(store, found):
+    """The few lines the console login hook prints. Removed when there is nothing to say."""
+    lines = []
+    failed = store.rows("SELECT txn_id, target_manifest_id FROM txn WHERE host_id = ? AND kind = 'update' "
+                        'ORDER BY created_at DESC, rowid DESC LIMIT 1', (host_id(),))
+    last = store.rows('SELECT state FROM txn WHERE txn_id = ?', (failed[0]['txn_id'],)) if failed else []
+    if last and last[0]['state'] == 'recovery_failed':
+        lines.append('CRITICAL: Nagios update %s failed and recovery failed. See docs/Update-Runbook.md.'
+                     % failed[0]['txn_id'])
+    running = active_txn(store)
+    if running:
+        approval = store.rows('SELECT a.window_start FROM txn t JOIN approval a ON a.approval_id = t.approval_id '
+                              'WHERE t.txn_id = ?', (running[0],))
+        if running[1] == 'approved' and approval and approval[0]['window_start']:
+            lines.append('Nagios update %s is scheduled for %s (UTC).' % (running[0], approval[0]['window_start']))
+        elif running[1] != 'approved':
+            lines.append('Nagios update %s is in progress (%s).' % (running[0], running[1]))
+    status = catalog_status(store, found)
+    if status.startswith('Update available'):
+        lines.append('%s. Review it with: sudo pinpoint-update' % status)
+    elif status.startswith('UNKNOWN') and catalog_state().get('checked_at'):
+        lines.append('Update status ' + status)
+    try:
+        if lines:
+            LOGIN_NOTICE.parent.mkdir(parents=True, exist_ok=True)
+            temp = LOGIN_NOTICE.with_name(LOGIN_NOTICE.name + '.tmp')
+            temp.write_text('PinPoint Update Manager:\n' + ''.join('  %s\n' % line for line in lines))
+            os.chmod(temp, 0o644)
+            os.replace(str(temp), str(LOGIN_NOTICE))
+        elif LOGIN_NOTICE.exists():
+            LOGIN_NOTICE.unlink()
+    except OSError:
+        pass
+    return lines
+
+
+def start_run(store, txn_id):
+    """Run an approved transaction in its own unit, so closing the session does not stop it (plan 8.1)."""
+    done = subprocess.run(['systemctl', 'start', '--no-block', EXEC_UNIT % txn_id], capture_output=True, text=True,
+                          timeout=60, check=False)
+    if done.returncode != 0:
+        raise CommandError(BLOCKED, 'Could not start %s: %s. The approval is kept; run it again with: '
+                           'sudo pinpoint-update run %s' % (EXEC_UNIT % txn_id, done.stderr.strip()[:200], txn_id))
+    with store.db:
+        store.audit('txn.start_requested', {'unit': EXEC_UNIT % txn_id}, txn_id=txn_id)
+
+
+STEP_LABELS = {'approved': 'Waiting to start', 'preparing': 'Preflight checks',
+               'staging': 'Downloading and building (monitoring still running)',
+               'applying': 'Applying (PinPoint web and Nagios stopped)', 'health_check': 'Health checks',
+               'rolling_back': 'Rolling back to the previous version'}
+
+
+def follow(store, txn_id, write=print, sleep=time.sleep, limit=7200):
+    """Print each step until the transaction ends. Ctrl-C stops watching, never the update."""
+    seen, waited = None, 0
+    try:
+        while waited <= limit:
+            row = store.db.execute('SELECT state, step, failure_code, recovery_status FROM txn WHERE txn_id = ?',
+                                   (txn_id,)).fetchone()
+            if row is None:
+                write('  No transaction %s.' % txn_id)
+                return INVALID_INPUT
+            state, step = row[0], row[1]
+            if (state, step) != seen:
+                seen = (state, step)
+                if state in FINISHED:
+                    write('  Result: %s%s' % (state.upper(), ' (%s)' % row[2] if row[2] else ''))
+                    if row[3]:
+                        write('  %s' % row[3])
+                    return OK if state == 'succeeded' else BLOCKED
+                write('  [..] %s%s' % (STEP_LABELS.get(state, state), ' - ' + step if step else ''))
+            sleep(2)
+            waited += 2
+    except KeyboardInterrupt:
+        pass
+    write('  Stopped watching. The update keeps running; see: sudo pinpoint-update status --follow')
+    return OK
+
+
 ##################################################
 # Console output
 ##################################################
-
-def catalog_status():
-    """There is no catalog yet: the result is always UNKNOWN, never 'up to date'."""
-    if CATALOG_URL is None:
-        return 'UNKNOWN (no update catalog is configured yet)'
-    return 'UNKNOWN'
 
 
 def render(rows, manifest, store, update_status):
@@ -800,20 +1297,26 @@ def render(rows, manifest, store, update_status):
              '  PinPoint Update Manager'.ljust(width - 30) + ('host: ' + socket.gethostname())[:30].rjust(30),
              '  %s %s %s' % (profile['os'].capitalize(), profile['version'], profile['arch']),
              '-' * width,
-             '  %-18s %-13s %-13s %s' % ('Component', 'Installed', 'Baseline', 'Status')]
+             '  %-18s %-13s %-13s %s' % ('Component', 'Installed', 'Expected', 'Status')]
     for r in rows:
-        lines.append('  %-18s %-13s %-13s %s' % (r['label'], r['installed'] or '-', r['baseline'], r['status']))
+        lines.append('  %-18s %-13s %-13s %s' % (r['label'], r['installed'] or '-', r['baseline'],
+                                                 'OK' if r['status'] == 'baseline' else r['status']))
     installed = store.installed_manifest()
     lines += ['-' * width,
-              '  Baseline manifest: %s%s' % (manifest['manifest_id'], '' if installed else ' (not recorded: versions differ)'),
+              '  Installed update set: %s' % (installed or '%s (not recorded: versions differ)' % manifest['manifest_id']),
               '  Update status: ' + update_status]
+    running = active_txn(store)
     for approval in decisions(store, decision='approve'):
         lines.append('  Approved: %s by %s, %s' % (approval['manifest_id'], approval['approver'],
-                                                   'window ' + approval['window_start'] if approval['window_start']
-                                                   else 'waiting to run'))
+                                                   'window ' + approval['window_start'] + ' UTC'
+                                                   if approval['window_start'] else 'waiting to run'))
+    if running and running[1] != 'approved':
+        lines.append('  Running: %s - %s' % (running[0], STEP_LABELS.get(running[1], running[1])))
+    lines.append('  Ubuntu security updates (nginx, Apache, OpenSSL...): %s' % {
+        'on': 'installed automatically by Ubuntu', 'off': 'NOT automatic'}[auto_security_updates()])
     lines.append('=' * width)
     if any(r['status'] != 'baseline' for r in rows):
-        lines.append('  Some components differ from the baseline. Nothing was changed.')
+        lines.append('  Some components differ from the installed update set. Nothing was changed.')
     return '\n'.join(lines)
 
 
@@ -824,31 +1327,169 @@ MENU = """
    4) Exit
 """
 
+DECISION_MENU = """
+   1) Install now
+   2) Schedule for later
+   3) Not now (ask me again later)
+   4) Defer (give a reason and a review date)
+   5) Decline this release
+   6) Back
+"""
 
-def menu(store, manifest, read=input, write=print):
-    rows = inventory(store, manifest)
-    status = catalog_status()
+
+def describe_set(store, record):
+    """The decision-screen summary of one update set (plan 8.1)."""
+    body, compat = record['body'], record['body']['compatibility']
+    current = reference(store, body)
+    lines = ['', '  Update set: %s   (digest %s..%s)' % (record['manifest_id'], record['sha256'][:4],
+                                                         record['sha256'][-2:])]
+    for key, label in COMPONENTS:
+        old, new = current['components'][key]['version'], body['components'][key]['version']
+        lines.append('  %-15s %s' % (label, '%s -> %s' % (old, new) if old != new else '%s (unchanged)' % new))
+    lines += ['  Compatibility: %s%s' % (record['compat_state'].upper(),
+                                         ' (evidence: %s)' % ', '.join(compat['evidence_ids'])
+                                         if compat.get('evidence_ids') else ''),
+              '  Security fixes: %s' % (', '.join(body.get('security', {}).get('advisories', [])) or 'none listed'),
+              '  Expected downtime: ~%d min   Rollback: automatic' % body.get('expected_downtime_minutes',
+                                                                              DEFAULT_DOWNTIME)]
+    lines += ['  Limitation: ' + item for item in compat.get('known_limitations', [])]
+    if body.get('release_notes_url'):
+        lines.append('  Release notes: ' + body['release_notes_url'])
+    return '\n'.join(lines)
+
+
+def ask(read, prompt):
+    try:
+        return read(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def confirm_set(store, record, read, write):
+    """Type the manifest ID; a conditional set shows its limitations and asks a second time."""
+    mid = record['manifest_id']
+    if ask(read, '  Type the update set ID to confirm (%s): ' % mid) != mid:
+        write('  The ID does not match. Nothing was changed.')
+        return None
+    if record['compat_state'] == 'conditional':
+        write('  This update set is CONDITIONAL. Its limitations are listed above.')
+        if (ask(read, '  Type ACCEPT to approve it with these limitations: ') or '').upper() != 'ACCEPT':
+            write('  Not accepted. Nothing was changed.')
+            return None
+        return True
+    return False
+
+
+def decision_screen(store, record, caller, read, write, sleep):
+    """Install now, schedule, not now, defer, decline or back, for one update set."""
+    mid = record['manifest_id']
     while True:
-        write(render(rows, manifest, store, status))
-        write(MENU)
+        write(describe_set(store, record))
+        write(DECISION_MENU)
+        choice = ask(read, '  Enter an option: ')
+        if choice in (None, '6'):
+            return
+        if choice == '3':
+            with store.db:
+                store.audit('approval.not_now', {}, mid)
+            write('  Nothing was changed. You will be reminded later.')
+            return
+        if choice not in ('1', '2', '4', '5'):
+            write('  Please enter a number from 1 to 6.')
+            continue
+        if caller != 'admin':
+            write('  Only members of %s can do this. Nothing was changed.' % ADMINS)
+            continue
         try:
-            choice = read('  Enter an option: ').strip()
-        except (EOFError, KeyboardInterrupt):
+            found = scan()
+            if choice in ('1', '2'):
+                accept = confirm_set(store, record, read, write)
+                if accept is None:
+                    continue
+                at = None
+                if choice == '2':
+                    text = ask(read, '  Start of the window (for example 2026-11-20 22:00, appliance time): ')
+                    try:
+                        at = time_arg(text or '')
+                    except argparse.ArgumentTypeError as error:
+                        write('  %s. Nothing was changed.' % error)
+                        continue
+                approval, txn_id, _ = approve(store, mid, found, at, None, accept)
+                if choice == '2':
+                    write('  Scheduled: %s runs in the window that starts %s UTC (transaction %s).'
+                          % (mid, approval['window_start'], txn_id))
+                    return
+                start_run(store, txn_id)
+                write('  Started %s (transaction %s). Do not power off the appliance.' % (mid, txn_id))
+                follow(store, txn_id, write, sleep)
+                return
+            reason = ask(read, '  Reason: ')
+            if choice == '4':
+                review = ask(read, '  Review date (YYYY-MM-DD): ')
+                refuse(store, mid, 'defer', reason_arg(reason or ''), date_arg(review or ''))
+                write('  Deferred. The installed version keeps running.')
+            else:
+                refuse(store, mid, 'decline', reason_arg(reason or ''))
+                write('  Declined. The installed version keeps running.')
+            return
+        except argparse.ArgumentTypeError as error:
+            write('  %s. Nothing was changed.' % error)
+        except CommandError as error:
+            write('  %s: %s' % (CODE_NAMES[error.code], error))
+            return
+
+
+def choose_screen(store, read, write):
+    """Option 3: update sets are installed whole; list each one with what it changes and pick one."""
+    sets = offers(store, scan())
+    if not sets:
+        write('\n  No update set can be installed on this host now. Choose 1 to reload the catalog.')
+        return None
+    current = reference(store, sets[0]['body'])
+    write('\n  Update sets that can be installed here (each is installed as a whole):')
+    for n, record in enumerate(sets, 1):
+        changes = ['%s %s -> %s' % (label, current['components'][key]['version'],
+                                    record['body']['components'][key]['version'])
+                   for key, label in COMPONENTS
+                   if current['components'][key]['version'] != record['body']['components'][key]['version']
+                   or current['components'][key]['artifact']['sha256']
+                   != record['body']['components'][key]['artifact']['sha256']]
+        write('   %d) %-22s %-12s %s' % (n, record['manifest_id'], record['compat_state'].upper(),
+                                        '; '.join(changes) or 'no version change'))
+    choice = ask(read, '  Choose a number (Enter to go back): ')
+    if choice and choice.isdigit() and 1 <= int(choice) <= len(sets):
+        return sets[int(choice) - 1]
+    return None
+
+
+def menu(store, manifest, read=input, write=print, caller='admin', sleep=time.sleep, fetch=None):
+    found, _ = refresh(store, manifest)
+    rows = compare(found, reference(store, manifest))
+    while True:
+        write(render(rows, manifest, store, catalog_status(store, found)))
+        write(MENU)
+        choice = ask(read, '  Enter an option: ')
+        if choice is None:
             write('')
             return 0
         if choice == '1':
-            rows = inventory(store, manifest)
-            status = catalog_status()
-            with store.db:
-                store.audit('catalog.unavailable', {'reason': 'no catalog configured'}, manifest['manifest_id'])
+            ok, reason, new = discover(store, fetch)
+            write('\n  %s\n' % ('Catalog checked%s.' % (': new update sets ' + ', '.join(new) if new else '')
+                                if ok else 'The catalog could not be checked: %s. Nothing was changed.' % reason))
         elif choice in ('2', '3'):
-            write('\n  Installing updates from this menu is not available in this version of PinPoint.\n'
-                  '  Approvals are made with: sudo pinpoint-update approve MANIFEST_ID --confirm MANIFEST_ID\n'
-                  '  Nothing was changed.\n')
+            sets = offers(store, found)
+            record = (sets[0] if sets else None) if choice == '2' else choose_screen(store, read, write)
+            if record:
+                decision_screen(store, record, caller, read, write, sleep)
+            elif choice == '2':
+                write('\n  No update can be installed on this host now. Choose 1 to reload the catalog.\n')
         elif choice == '4':
             return 0
         else:
             write('\n  Please enter 1, 2, 3 or 4.\n')
+            continue
+        found, _ = refresh(store, manifest)
+        rows = compare(found, reference(store, manifest))
 
 
 ##################################################
@@ -909,7 +1550,13 @@ def build_parser():
     sub = parser.add_subparsers(dest='command', metavar='COMMAND')
     sub.add_parser('menu', help='the numbered console menu (default on a terminal)')
     sub.add_parser('inventory', parents=[common], help='scan the installed versions')
-    sub.add_parser('status', parents=[common], help='installed versions, approvals and update status')
+    p = sub.add_parser('status', parents=[common], help='installed versions, approvals and update status')
+    p.add_argument('--follow', action='store_true', help='watch the running update until it ends')
+    p = sub.add_parser('discover', parents=[common], help='check the update catalog for new update sets')
+    p.add_argument('--timeout', type=range_arg(1, 120), default=30, help='seconds per download, 1 to 120')
+    p.add_argument('--quiet', action='store_true', help='print nothing unless the check fails (for the timer)')
+    p = sub.add_parser('run', parents=[common], help='start an approved update now (admin)')
+    p.add_argument('txn_id', type=pattern_arg(TXN_PATTERN, 'transaction ID'))
     p = sub.add_parser('list', parents=[common], help='recorded manifests and whether they can be installed')
     p.add_argument('--all', action='store_true', help='include revoked manifests')
     p = sub.add_parser('show', parents=[common], help='one manifest, its evidence and limitations')
@@ -922,6 +1569,7 @@ def build_parser():
     p.add_argument('--at', type=time_arg, help='start of the maintenance window (default: no window yet)')
     p.add_argument('--window-minutes', type=range_arg(30, 1440), help='length of the window, 30 to 1440')
     p.add_argument('--accept-limitations', action='store_true', help='confirm a conditional manifest')
+    p.add_argument('--now', action='store_true', help='start the update right away (Nagios stops for a few minutes)')
     p = sub.add_parser('defer', parents=[common], help='defer one manifest until a review date (admin)')
     p.add_argument('manifest_id', type=manifest_id)
     p.add_argument('--reason', required=True, type=reason_arg)
@@ -1009,7 +1657,8 @@ def command_validate(store, args, found):
 
 def command_history(store, args):
     items = store.rows('SELECT t.txn_id, t.kind, t.source_manifest_id, t.target_manifest_id, t.state, t.failure_code, '
-                       't.recovery_status, t.created_at, t.finished_at, t.downtime_seconds, a.approver '
+                       't.recovery_status, t.recovery_point_id, t.created_at, t.finished_at, t.downtime_seconds, '
+                       'a.approver '
                        'FROM txn t LEFT JOIN approval a ON a.approval_id = t.approval_id WHERE t.host_id = ? '
                        'ORDER BY t.created_at DESC LIMIT ?', (host_id(), args.limit))
     lines = ['  %-27s %-6s %-36s %-11s %-15s %s' % ('Transaction', 'Kind', 'From -> to', 'Approver', 'Result',
@@ -1034,13 +1683,52 @@ def command_audit(store, args):
     return OK if broken is None else 1
 
 
+def command_discover(store, manifest, args, fetch=None):
+    ok, reason, new = discover(store, fetch, args.timeout)
+    found, problems = refresh(store, manifest)
+    for record in offers(store, found):
+        notice_available(store, record)
+    send_notices(store)
+    status = catalog_status(store, found)
+    if not ok:
+        raise CommandError(CATALOG_UNAVAILABLE, 'The catalog could not be checked: %s. Nothing was changed.' % reason)
+    if not args.quiet or args.json:
+        emit(args, {'new_manifests': new, 'update_status': status, 'refused_files': problems},
+             '  Catalog checked. %s%s' % (status, '\n  New update sets: ' + ', '.join(new) if new else ''))
+    return OK
+
+
+def command_run(store, args):
+    row = store.db.execute('SELECT state FROM txn WHERE txn_id = ? AND host_id = ? AND kind = ?',
+                           (args.txn_id, host_id(), 'update')).fetchone()
+    if row is None:
+        raise CommandError(INVALID_INPUT, 'No update transaction %s on this host.' % args.txn_id)
+    if row[0] != 'approved':
+        raise CommandError(INVALID_TRANSITION, 'Transaction %s is %s, not approved.' % (args.txn_id, row[0]))
+    start_run(store, args.txn_id)
+    emit(args, {'txn_id': args.txn_id, 'started': True}, '  Started %s.' % args.txn_id)
+    if sys.stdout.isatty() and not args.json:
+        return follow(store, args.txn_id)
+    return OK
+
+
 def run_command(store, manifest, args):
     command = args.command
     if command == 'menu':
-        return menu(store, manifest)
+        return menu(store, manifest, caller=getattr(args, 'caller', 'admin'))
     if command == 'audit':
         return command_audit(store, args)
+    if command == 'discover':
+        return command_discover(store, manifest, args)
     found, problems = refresh(store, manifest)
+    if command == 'run':
+        return command_run(store, args)
+    if command == 'status' and args.follow:
+        running = active_txn(store)
+        if not running:
+            print('  No update is running.')
+            return OK
+        return follow(store, running[0])
     if command == 'list':
         return command_list(store, args, found, problems)
     if command == 'show':
@@ -1052,13 +1740,20 @@ def run_command(store, manifest, args):
     if command == 'approve':
         if args.confirm != args.manifest_id:
             raise CommandError(INVALID_INPUT, 'The confirmation does not match the manifest ID. Nothing was approved.')
+        if args.now and args.at:
+            raise CommandError(INVALID_INPUT, 'Use --now or --at, not both.')
         approval, txn_id, created = approve(store, args.manifest_id, found, args.at, args.window_minutes,
                                             args.accept_limitations)
-        emit(args, {'approval': approval, 'txn_id': txn_id, 'created': created},
-             '  %s %s for this host (approval %s, transaction %s, expires %s).\n'
-             '  It will be installed by a later version of the Update Manager; nothing was changed now.'
+        when = ('It starts now.' if args.now else 'It runs in the window that starts %s UTC.' % approval['window_start']
+                if approval['window_start'] else 'Start it with: sudo pinpoint-update run %s' % txn_id)
+        emit(args, {'approval': approval, 'txn_id': txn_id, 'created': created, 'started': args.now},
+             '  %s %s for this host (approval %s, transaction %s, expires %s).\n  %s'
              % ('Approved' if created else 'Already approved:', args.manifest_id, approval['approval_id'], txn_id,
-                approval['expires_at']))
+                approval['expires_at'], when))
+        if args.now:
+            start_run(store, txn_id)
+            if sys.stdout.isatty() and not args.json:
+                return follow(store, txn_id)
         return OK
     if command in ('defer', 'decline'):
         approval, created = refuse(store, args.manifest_id, command, args.reason, getattr(args, 'review_date', None))
@@ -1071,14 +1766,16 @@ def run_command(store, manifest, args):
         emit(args, {'txn_id': args.txn_id, 'changed': changed},
              '  Transaction %s %s.' % (args.txn_id, 'cancelled' if changed else 'was already cancelled'))
         return OK
-    rows = compare(found, manifest)
+    rows = compare(found, reference(store, manifest))
+    status = catalog_status(store, found)
     if args.json:
         emit(args, {'manifest_id': manifest['manifest_id'], 'installed_manifest': store.installed_manifest(),
-                    'os': os_profile(), 'pinpoint_commit': app_commit(), 'update_status': catalog_status(),
+                    'os': os_profile(), 'pinpoint_commit': app_commit(), 'update_status': status,
                     'components': rows, 'approvals': decisions(store, decision='approve'),
-                    'active_txn': (active_txn(store) or [None])[0], 'refused_files': problems}, '')
+                    'active_txn': (active_txn(store) or [None])[0], 'refused_files': problems,
+                    'ubuntu_security_updates': auto_security_updates()}, '')
     else:
-        print(render(rows, manifest, store, catalog_status()))
+        print(render(rows, manifest, store, status))
     return OK
 
 
@@ -1107,6 +1804,7 @@ def main(argv=None):
                 store.audit('auth.refused', {'command': args.command, 'role': caller})
             raise CommandError(NOT_AUTHORISED, '%s may not run "%s". Ask an administrator to add you to %s.'
                                % (actor(), args.command, VIEWERS if caller is None else ADMINS))
+        args.caller = caller
         return run_command(store, manifest, args)
     except InvalidTransition as error:
         return report(args, CommandError(INVALID_TRANSITION, 'Invalid transition: %s' % error))

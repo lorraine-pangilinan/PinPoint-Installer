@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "manifests": [
+    {
+      "manifest_id": "pp-mon-2026.11-1",
+      "sha256": "8265031a1de960d0b02cb03ee13146ffda0598632bb4a899be8f9d922374b51e"
+    }
+  ],
+  "revoked": []
+}

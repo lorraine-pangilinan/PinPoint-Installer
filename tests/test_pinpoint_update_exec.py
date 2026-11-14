@@ -318,7 +318,111 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(context['ncpa_sha256'], 'b' * 64)
 
 
+    # Update runs (plan 10.2) ------------------------------------------------
+
+    def prepare_update(self, window_start=None):
+        """Record the baseline as installed, add the shipped 4.5.14 update set and approve it."""
+        pu, root = self.pu, Path(self.temp.name)
+        pu.MANIFEST_DIR = root / 'manifests'
+        pu.MANIFEST_DIR.mkdir()
+        pu.MANIFEST = pu.MANIFEST_DIR / BASELINE.name
+        shutil.copy(str(BASELINE), str(pu.MANIFEST))
+        shutil.copy(str(CANDIDATE_FILE), str(pu.MANIFEST_DIR / CANDIDATE_FILE.name))
+        pu.OS_RELEASE = root / 'os-release'
+        pu.OS_RELEASE.write_text('ID=ubuntu\nVERSION_ID="22.04"\n')
+        for name in ('LOGIN_NOTICE', 'UPDATER_CONF', 'OBJECTS_CACHE', 'AUTO_UPGRADES', 'LOG'):
+            setattr(pu, name, root / name.lower())
+        pu.JOURNAL = None
+        pu.trusted_file = lambda path: True
+        self.ex.BUILD_ROOT = root / 'update-build'
+        self.version = '4.5.11'
+        pu.scan = lambda: {'nagios-core': {'version': self.version, 'sha256': 'a' * 64},
+                           'nagios-plugins': {'version': '2.4.12', 'sha256': None},
+                           'check-ncpa': {'version': '1.2.4', 'sha256': 'b' * 64}}
+        for p in (patch.object(pu.platform, 'machine', return_value='x86_64'),
+                  patch.object(self.ex, 'builder_ids', return_value=(999, 999))):
+            p.start()
+            self.addCleanup(p.stop)
+        pu.refresh(self.store, pu.load_manifest())
+        found = pu.scan()
+        approval, txn_id, _ = pu.approve(self.store, CANDIDATE_FILE.stem, found, window_start, None, True)
+        return txn_id
+
+    def fake_install(self, store, txn_id, target, ready):
+        self.installed = sorted(ready)
+        self.version = '4.5.14'
+        (self.nagios / 'bin/nagios').write_text('binary 4.5.14\n')
+
+    def test_update_succeeds_and_records_the_new_set(self):
+        txn_id = self.prepare_update()
+        with patch.object(self.ex, 'stage', return_value={'nagios-core': Path('src')}), \
+                patch.object(self.ex, 'install_components', side_effect=self.fake_install):
+            self.assertEqual(self.ex.run_update(self.store, txn_id), self.ex.OK)
+        self.assertEqual(self.installed, ['nagios-core'])
+        self.assertEqual(self.row(txn_id)[0], 'succeeded')
+        self.assertEqual(self.store.installed_manifest(), CANDIDATE_FILE.stem)
+        self.assertEqual(self.store.rows('SELECT status FROM approval')[0]['status'], 'used')
+        self.assertEqual(self.store.rows('SELECT kind FROM notice WHERE txn_id = ?', (txn_id,))[0]['kind'],
+                         'succeeded')
+        self.assertEqual(self.health_calls, ['save', 'compare'])
+        self.assertIsNone(self.store.verify_audit())
+
+    def test_update_that_fails_health_is_rolled_back(self):
+        txn_id = self.prepare_update()
+        self.healthy = lambda mode: mode == 'save' or self.version == '4.5.11'
+        with patch.object(self.ex, 'stage', return_value={'nagios-core': Path('src')}), \
+                patch.object(self.ex, 'install_components', side_effect=self.fake_install):
+            self.version_after_restore = None
+            restore = self.ex.restore
+
+            def restore_and_reset(*args, **kw):
+                restore(*args, **kw)
+                self.version = '4.5.11'
+            with patch.object(self.ex, 'restore', side_effect=restore_and_reset):
+                self.assertEqual(self.ex.run_update(self.store, txn_id), self.ex.ROLLED_BACK)
+        self.assertEqual(self.row(txn_id)[:3], ('rolled_back', 'restore.started', 'HEALTH_FAILED'))
+        self.assertEqual((self.nagios / 'bin/nagios').read_text(), 'binary 4.5.11\n')
+        self.assertEqual(self.store.installed_manifest(), 'pp-mon-baseline-1')
+        self.assertEqual(self.ex.file_list(self.nagios), self.original)
+
+    def test_build_failure_changes_nothing(self):
+        txn_id = self.prepare_update()
+        with patch.object(self.ex, 'stage', side_effect=self.ex.BuildError('"make all" exited with 2')):
+            self.assertEqual(self.ex.run_update(self.store, txn_id), self.ex.PREFLIGHT_FAILED)
+        self.assertEqual(self.row(txn_id)[0::2], ('failed', 'BUILD_FAILED'))
+        self.assertEqual(self.systemctl_calls, [])  # Nagios and PinPoint web were never stopped
+        self.assertEqual(self.ex.file_list(self.nagios), self.original)
+
+    def test_download_with_a_wrong_digest_is_refused_before_building(self):
+        txn_id = self.prepare_update()
+        target = self.store.manifest(CANDIDATE_FILE.stem)['body']
+        with patch.object(self.ex, 'as_builder') as builder:
+            with self.assertRaises(self.ex.BuildError):
+                self.ex.stage(self.store, txn_id, target, ['nagios-core'],
+                              fetch=lambda url, limit, timeout, hosts: b'not the real tarball')
+            builder.assert_not_called()
+
+    def test_scheduled_update_waits_for_its_window(self):
+        import datetime
+        later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)).replace(microsecond=0)
+        txn_id = self.prepare_update(self.pu.utc(later))
+        self.assertEqual(self.ex.run_update(self.store, txn_id), self.ex.BLOCKED)
+        self.assertEqual(self.ex.run_due(self.store), self.ex.OK)
+        self.assertEqual(self.row(txn_id)[0], 'approved')
+
+    def test_changed_components_and_artifact_names(self):
+        base = json.loads(BASELINE.read_text())
+        new = json.loads(CANDIDATE_FILE.read_text())
+        self.assertEqual(self.ex.changed_components(base, new), ['nagios-core'])
+        self.assertEqual(self.ex.changed_components(base, base), [])
+        self.assertEqual(self.ex.artifact_name(new['components']['nagios-core']['artifact']), 'nagios-4.5.14.tar.gz')
+        for name in ('../x.tar.gz', '.hidden', 'a b.tgz'):
+            with self.assertRaises(self.ex.BuildError):
+                self.ex.artifact_name({'url': 'https://x/y', 'file': name})
+
+
 DRILL_LINE = 'pinpoint_drill_invalid_directive=1\n'
+CANDIDATE_FILE = REPO / 'catalog/manifests/pp-mon-2026.11-1.json'
 
 
 if __name__ == '__main__':

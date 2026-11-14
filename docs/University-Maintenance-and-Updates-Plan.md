@@ -93,8 +93,17 @@ Decisions carried over from the 26 October handoff discussion:
 - **No manifest signing** (28 October 2026). Nobody owns a signing key, so none is used. A manifest is
   trusted because it sits in the root-only folder `/etc/pinpoint/updates/manifests/`. Its SHA-256 is
   recorded the first time it is seen, and a later edit is refused. Every install still needs a named
-  admin's approval. Before the online catalog (Phase 4) downloads manifests, the university must decide
-  how a downloaded manifest is trusted: signing again, or a pinned catalog host and digest list.
+  admin's approval.
+- **Catalog trust: pinned host and digest list** (14 November 2026; answers B2). The catalog is the
+  `catalog/` folder of the university's GitHub repository, read only from
+  `https://raw.githubusercontent.com/...` over HTTPS with certificate checks. `catalog/index.json` lists
+  every manifest with its SHA-256; one file that does not match makes the appliance refuse the whole
+  download. A recorded manifest can never change. Everyone who can write to the repository uses GitHub
+  two-factor authentication, and `main` needs a reviewed pull request. Signing can be added later on top
+  of this without changing the appliances' other checks. See `catalog/README.md`.
+- **Ubuntu packages stay with Ubuntu** (14 November 2026). nginx, Apache, Python, OpenSSL and the other
+  Ubuntu packages are signed and updated by Ubuntu; `configure-monitoring-updates.sh` makes sure daily
+  security updates (`unattended-upgrades`) are on, and the menu shows whether they are.
 
 ### 2.2 Verified facts about the current installer
 
@@ -731,8 +740,17 @@ or passed to a shell. No command accepts a URL, a path or a shell fragment.
 CLI form of the second confirmation for a `conditional` manifest. A scheduled window must start in
 the future, be at least twice the expected downtime (update plus rollback), and end before the
 approval expires. `approve` records the approval and an `approved` transaction, but nothing runs it
-yet; the run timer and executor cutover are Phase 5. `discover` (Phase 4) and `recover` (Phase 5) are
-not built yet.
+yet; the run timer and executor cutover are Phase 5.
+
+**Built in Phases 4 and 5 (branch `feat/update-catalog-install`):** `discover [--timeout N] [--quiet]`
+(catalog check; exit 7 when it fails), `run TXN_ID` (admin: start an approved update now),
+`approve ... --now`, and `status --follow`. The menu's options 2 and 3 open the decision screen
+(install now, schedule, not now, defer, decline). The executor adds `pinpoint-update-exec run TXN_ID`
+(run as `pinpoint-update-exec@TXN_ID.service`) and `run-due` (started every 5 minutes by
+`pinpoint-update-run.timer`). Simplifications: option 3 lists whole update sets with what each changes
+instead of ticking single components; email reminders every 7 days, the weekly digest and the
+security escalation are not built; `recover` is not built, and the manual restore is in
+`docs/Update-Runbook.md` section 5.
 
 ### 8.5 Exit codes and errors
 
@@ -1014,7 +1032,7 @@ measures actual restore time so the agreed number is realistic.
 | Area | Control |
 |---|---|
 | Transport | HTTPS only; certificate validation through the system trust store; no redirects to non-allowlisted hosts; timeouts and size limits |
-| Manifest trust | No signatures (§2.1). Accepted only from the root-only manifest folder (folder and file owned by root, not group- or world-writable); SHA-256 recorded on first sight; a changed file is refused and audited. To be revisited before the online catalog (Phase 4) |
+| Manifest trust | No signatures (§2.1). Downloaded only from the pinned catalog host (`raw.githubusercontent.com`, HTTPS, redirects only to the same host) and accepted only if its bytes match the SHA-256 in `index.json`; all or nothing. Stored in the root-only manifest folder; SHA-256 recorded on first sight; a changed file is refused and audited. Repository writers use GitHub 2FA and reviewed pull requests |
 | Artifact trust | SHA-256 from the manifest; checked on download and again by the executor before use |
 | Keys | None while manifests are unsigned. Revocation through `revoked.json` in the root-only folder |
 | Allowlist | `updater.conf` lists allowed hosts (for example `assets.nagios.com`, `nagios-plugins.org`, `<PLACEHOLDER catalog host>`, optional `<PLACEHOLDER mirror>`) |
@@ -1224,7 +1242,13 @@ gantt
 
 Status: Phases 1 and 2 are built (branches `feat/verified-nagios-baseline` and
 `feat/nagios-recovery-foundation`). Phase 3 is built on `feat/update-validation-approval`: unit tests in
-`tests/test_pinpoint_update_approval.py`, VM runner `tests/update-approval-tests.sh`.
+`tests/test_pinpoint_update_approval.py`, VM runner `tests/update-approval-tests.sh`. Phases 1 to 3 are
+on `main`. Phases 4 and 5 are built on `feat/update-catalog-install` (14 November 2026): catalog in
+`catalog/`, unit tests in `tests/test_pinpoint_update_catalog.py` and `tests/test_pinpoint_update_exec.py`,
+VM runner `tests/update-install-tests.sh`, runbook draft `docs/Update-Runbook.md`. The first catalog
+update set is `pp-mon-2026.11-1` (Nagios Core 4.5.11 → 4.5.14, security fixes), `conditional` until
+university IT accepts the staging evidence. Phase 6 (pilot on a real appliance, training, sign-off)
+needs the university's people and is not started.
 
 **Total: about 14–18 weeks** with Phases 1 and 2 in parallel (two people), or about 18–22 weeks for
 one person. Phase 2 can start as soon as the database layout from Phase 1 is fixed. The notification
