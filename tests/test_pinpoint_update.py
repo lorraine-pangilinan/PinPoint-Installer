@@ -30,6 +30,13 @@ class UpdateManagerTest(unittest.TestCase):
         self.pu.APP_DIR = root / 'app'
         self.pu.OS_RELEASE = root / 'os-release'
         self.pu.OS_RELEASE.write_text('ID=ubuntu\nVERSION_ID="22.04"\n')
+        self.pu.MANIFEST_DIR = root / 'manifests'
+        self.pu.LOGIN_NOTICE = root / 'update-notice'
+        self.pu.UPDATER_CONF = root / 'updater.conf'
+        self.pu.OBJECTS_CACHE = root / 'objects.cache'
+        self.pu.AUTO_UPGRADES = root / '20auto-upgrades'
+        self.pu.LOG = root / 'pinpoint-update.log'
+        self.pu.JOURNAL = None
         self.manifest = self.pu.load_manifest(BASELINE)
         self.outputs = {'nagios': CORE_V, 'check_ping': PING_V, 'check_ncpa.py': NCPA_V}
         run = patch.object(self.pu, 'run', side_effect=lambda args: self.outputs[Path(args[0]).name])
@@ -82,23 +89,28 @@ class UpdateManagerTest(unittest.TestCase):
             self.store.db.execute("UPDATE audit SET actor = 'someone-else' WHERE seq = 1")
         self.assertEqual(self.store.verify_audit(), 1)
 
-    def test_menu_options_change_nothing_and_never_claim_up_to_date(self):
+    def test_menu_without_a_reachable_catalog_changes_nothing_and_never_claims_up_to_date(self):
         self.install('nagios', 'check_ping', 'check_ncpa.py')
         answers, out = iter(['2', '3', '9', '1', '4']), io.StringIO()
         nagios_before = sorted(p.name for p in self.pu.NAGIOS.rglob('*'))
+
+        def offline(url, limit, timeout, hosts):
+            raise self.pu.CatalogError('cannot download %s (network is unreachable)' % url)
         code = self.pu.menu(self.store, self.manifest, read=lambda prompt: next(answers),
-                            write=lambda text='': out.write(text + '\n'))
+                            write=lambda text='': out.write(text + '\n'), fetch=offline)
         text = out.getvalue()
         self.assertEqual(code, 0)
-        self.assertEqual(text.count('Installing updates from this menu is not available'), 2)
+        self.assertIn('No update can be installed on this host now', text)
+        self.assertIn('No update set can be installed on this host now', text)
         self.assertIn('Please enter 1, 2, 3 or 4.', text)
-        self.assertIn('Update status: UNKNOWN', text)
+        self.assertIn('The catalog could not be checked', text)
+        self.assertIn('Update status: UNKNOWN (last check failed', text)
         self.assertNotIn('up to date', text.lower())
         for option in ('1) Reload (check for updates)', '2) Install updates', '3) Choose what to update', '4) Exit'):
             self.assertIn(option, text)
         self.assertEqual(sorted(p.name for p in self.pu.NAGIOS.rglob('*')), nagios_before)
         events = [e for (e,) in self.store.db.execute('SELECT event FROM audit')]
-        self.assertIn('catalog.unavailable', events)
+        self.assertIn('catalog.failed', events)
 
     def test_menu_exits_cleanly_on_end_of_input(self):
         def eof(prompt):
@@ -127,7 +139,7 @@ class UpdateManagerTest(unittest.TestCase):
         self.pu.MENU_PENDING = Path(self.temp.name) / 'update-menu-pending'
         self.pu.MENU_PENDING.write_text('')
         shown = []
-        with patch.object(self.pu.os, 'geteuid', return_value=0, create=True),                 patch.object(self.pu, 'menu', side_effect=lambda store, manifest: shown.append(1) or 0):
+        with patch.object(self.pu.os, 'geteuid', return_value=0, create=True),                 patch.object(self.pu, 'menu', side_effect=lambda store, manifest, **kw: shown.append(1) or 0):
             self.assertEqual(self.pu.main(['--first-login']), 0)
             self.assertEqual(self.pu.main(['--first-login']), 0)
         self.assertEqual(shown, [1])

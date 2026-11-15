@@ -9,3 +9,8 @@ autoinstall/meta-data          text eol=lf
 firstboot/*.before-*           text eol=lf
 
 *.py                           text eol=lf
+
+# The update catalog is checked byte for byte against the SHA-256
+# in catalog/index.json, so git must never change its line endings.
+catalog/**                     -text
+tests/catalog-fixtures/**      -text

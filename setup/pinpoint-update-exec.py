@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""PinPoint update executor, Phase 2: recovery points, restore and reconcile.
+"""PinPoint update executor: install approved updates, recovery points, restore and reconcile.
 
 Before anything in Nagios changes, a recovery point is taken: a copy of
 /usr/local/nagios (on the same filesystem, so restoring is a rename) plus
@@ -10,9 +10,18 @@ Every restore step is recorded first, so running it twice gives the same
 result, and an interrupted transaction is always finished toward the
 previous version, never forward (plan sections 7.2 and 11).
 
-Phase 2 installs no update. The `drill` command runs the whole recovery
-path on a staging appliance, with an optional injected fault (plan section
-13.4), and records how long each part took.
+`run TXN_ID` installs one approved update (plan 10.2): preflight, download
+the changed components from the official sites and check their SHA-256,
+build them as the unprivileged pinpoint-updater user while monitoring keeps
+running, then stop PinPoint web and Nagios, take the recovery point, run the
+`make install` targets (never install-config or install-webconf), start the
+services and run the health suite. Healthy: the new update set is recorded
+as installed. Not healthy: automatic rollback. `run-due` is started by a
+timer and runs scheduled updates whose window has opened.
+
+The `drill` command runs the whole recovery path on a staging appliance,
+with an optional injected fault (plan section 13.4), and records how long
+each part took.
 """
 import argparse
 import hashlib
@@ -21,6 +30,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import stat
@@ -45,8 +55,23 @@ SERVICES = ('pinpoint-gunicorn', 'nagios')
 UNVERIFIED = ('var/rw', 'var/nagios.lock')
 SPACE_MARGIN = 1 << 30  # <PLACEHOLDER 1 GB> in plan section 10.2, step 9
 HEALTH_TIMEOUT = 900
+# Build area for the unprivileged builder; one folder per transaction.
+BUILD_ROOT = Path('/var/lib/pinpoint/update-build')
+BUILDER = 'pinpoint-updater'
+BUILD_TIMEOUT = 3600
+DOWNLOAD_LIMIT = 64 << 20
+DOWNLOAD_TIMEOUT = 120
+LIBEXEC = NAGIOS / 'libexec'
+# Fault injection on a real update is for staging only: this root-owned file must exist.
+FAULT_MARKER = Path('/etc/pinpoint/updates/allow-fault-injection')
+# make targets per build profile (plan 10.2, step 13). Never install-config or install-webconf.
+INSTALL_TARGETS = {'core-source-v1': ['install', 'install-daemoninit', 'install-commandmode'],
+                   'plugins-source-v1': ['install']}
+BUILD_STEPS = {'core-source-v1': [['./configure', '--with-httpd-conf=/etc/apache2/sites-enabled'], ['make', 'all']],
+               'plugins-source-v1': [['./configure', '--with-nagios-user=nagios', '--with-nagios-group=nagios',
+                                      '--with-mysql=/usr'], ['make']]}
 
-OK, NOT_AUTHORISED, BUSY, INVALID_TRANSITION, PREFLIGHT_FAILED = 0, 3, 5, 6, 8
+OK, INVALID_INPUT, NOT_AUTHORISED, BLOCKED, BUSY, INVALID_TRANSITION, PREFLIGHT_FAILED = 0, 2, 3, 4, 5, 6, 8
 ROLLED_BACK, RECOVERY_FAILED, DRILL_FAULT_MISSED = 10, 11, 12
 
 FAULTS = ('config', 'service', 'plugin', 'corrupt')
@@ -56,6 +81,10 @@ pu = None  # the controller module, loaded in main()
 
 
 class RecoveryError(Exception):
+    pass
+
+
+class BuildError(Exception):
     pass
 
 
@@ -541,6 +570,285 @@ def drill(store, fault=None, crash_after_apply=False):
 
 
 ##################################################
+# Update (plan 10.2)
+##################################################
+
+def changed_components(source, target):
+    """Components whose version or artifact differs between two manifests, in install order."""
+    return [key for key in pu.BUILD_PROFILES
+            if source['components'][key]['version'] != target['components'][key]['version']
+            or source['components'][key]['artifact']['sha256'] != target['components'][key]['artifact']['sha256']]
+
+
+def builder_ids():
+    import pwd  # Linux only
+    entry = pwd.getpwnam(BUILDER)
+    return entry.pw_uid, entry.pw_gid
+
+
+def as_builder(args, cwd, log):
+    """Run one build command as the unprivileged builder, with a clean environment."""
+    env = ['env', '-i', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+           'HOME=%s' % cwd, 'LANG=C']
+    run_logged(['runuser', '-u', BUILDER, '--', *env, *args], cwd, log)
+
+
+def run_logged(args, cwd, log):
+    with open(log, 'a', encoding='utf-8') as f:
+        f.write('\n$ %s\n' % ' '.join(args))
+        f.flush()
+        try:
+            done = subprocess.run(args, cwd=str(cwd), stdout=f, stderr=subprocess.STDOUT, timeout=BUILD_TIMEOUT,
+                                  check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise BuildError('%s could not run: %s' % (args[0], error))
+    if done.returncode != 0:
+        tail = Path(log).read_text(errors='replace').strip().splitlines()[-3:]
+        raise BuildError('"%s" exited with %d: %s' % (' '.join(args[-2:]), done.returncode, ' | '.join(tail)[-300:]))
+
+
+def artifact_name(artifact):
+    from urllib.parse import urlsplit
+    name = artifact.get('file') or os.path.basename(urlsplit(artifact['url']).path)
+    if not name or name.startswith('.') or not all(c.isalnum() or c in '._+-' for c in name):
+        raise BuildError('unsafe artifact file name %r' % name[:80])
+    return name
+
+
+def stage(store, txn_id, target, keys, fetch=None):
+    """Download, check and build the changed components while monitoring keeps running. Returns {key: path}."""
+    fetch = fetch or pu.http_get
+    build = BUILD_ROOT / txn_id
+    shutil.rmtree(str(build), ignore_errors=True)
+    BUILD_ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
+    build.mkdir(mode=0o700)
+    uid, gid = builder_ids()
+    os.chown(str(build), uid, gid)
+    log = workdir(txn_id) / 'build.log'
+    ready = {}
+    for key in keys:
+        part = target['components'][key]
+        artifact, profile = part['artifact'], part['build_profile']
+        update_txn(store, txn_id, step='stage.download.' + key)
+        say('  Downloading %s %s...' % (key, part['version']))
+        data = fetch(artifact['url'], DOWNLOAD_LIMIT, DOWNLOAD_TIMEOUT, pu.ARTIFACT_HOSTS)
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != artifact['sha256']:
+            raise BuildError('%s does not match the SHA-256 in the manifest (got %s..%s)' % (key, digest[:8],
+                                                                                           digest[-4:]))
+        archive = build / artifact_name(artifact)
+        archive.write_bytes(data)
+        os.chown(str(archive), uid, gid)
+        os.chmod(str(archive), 0o644)
+        dest = build / key
+        dest.mkdir(mode=0o700)
+        os.chown(str(dest), uid, gid)
+        update_txn(store, txn_id, step='stage.extract.' + key)
+        as_builder(['tar', '-xzf', str(archive), '-C', str(dest), '--no-same-owner', '--no-same-permissions'],
+                   build, log)
+        if profile == 'ncpa-client-v1':
+            found = sorted(dest.rglob('check_ncpa.py'))
+            if not found or found[0].is_symlink() or not found[0].is_file():
+                raise BuildError('check_ncpa.py not found in %s' % archive.name)
+            ready[key] = found[0]
+            continue
+        tops = [p for p in dest.iterdir() if p.is_dir() and not p.is_symlink()]
+        if len(tops) != 1 or not (tops[0] / 'configure').is_file():
+            raise BuildError('%s does not contain one source folder with a configure script' % archive.name)
+        update_txn(store, txn_id, step='stage.build.' + key)
+        say('  Building %s %s as %s (monitoring keeps running)...' % (key, part['version'], BUILDER))
+        for command in BUILD_STEPS[profile]:
+            as_builder(command, tops[0], log)
+        ready[key] = tops[0]
+    return ready
+
+
+def install_ncpa(source):
+    """Same steps as install-nagios-plugins.sh: copy, python3 interpreter line, nagios:nagios 0755."""
+    import pwd
+    nagios = pwd.getpwnam('nagios')
+    text = source.read_bytes()
+    first, sep, rest = text.partition(b'\n')
+    if re.match(rb'^#!.*[\s/]python\s*$', first):
+        first = re.sub(rb'python\s*$', b'python3', first)
+    temp = LIBEXEC / '.check_ncpa.py.pinpoint-update'
+    temp.write_bytes(first + sep + rest)
+    os.chown(str(temp), nagios.pw_uid, nagios.pw_gid)
+    os.chmod(str(temp), 0o755)
+    os.replace(str(temp), str(LIBEXEC / 'check_ncpa.py'))
+
+
+def install_components(store, txn_id, target, ready):
+    """Apply step 13: the make install targets as root, never install-config. Services are stopped."""
+    log = workdir(txn_id) / 'install.log'
+    for key, path in ready.items():
+        profile = target['components'][key]['build_profile']
+        update_txn(store, txn_id, step='apply.install.' + key)
+        if profile == 'ncpa-client-v1':
+            install_ncpa(path)
+        else:
+            run_logged(['make', *INSTALL_TARGETS[profile]], path, log)
+    systemctl('daemon-reload')
+
+
+def end_approval(store, approval_id):
+    with store.db:
+        if store.db.execute("UPDATE approval SET status = 'used' WHERE approval_id = ? AND status = 'active'",
+                            (approval_id,)).rowcount:
+            store.audit('approval.used', {'approval_id': approval_id}, who='executor')
+
+
+def announce(store, txn_id):
+    """Queue and send the result notice, and refresh the login notice. Never stops the executor."""
+    try:
+        pu.notice_result(store, txn_id)
+        pu.send_notices(store)
+        pu.write_login_notice(store, pu.scan())
+    except Exception as error:  # a notice must never change the outcome of an update
+        say('  Notice not sent: %s' % type(error).__name__)
+
+
+def stop_here(store, txn_id, approval_id, to, code, detail):
+    transition(store, txn_id, to, failure_code=code, recovery_status=detail[:500])
+    end_approval(store, approval_id)
+    say('Not installed (%s): %s' % (code, detail))
+    say('Nothing in Nagios was changed.')
+    announce(store, txn_id)
+    return PREFLIGHT_FAILED
+
+
+def run_update(store, txn_id, fault=None, crash_after_apply=False, fetch=None):
+    """Install one approved update (plan 10.2). Returns OK, ROLLED_BACK, RECOVERY_FAILED or a refusal code."""
+    lock = take_lock()
+    if lock is None:
+        say('BUSY: another update, drill or PinPoint web deployment is running.')
+        return BUSY
+    row = store.db.execute('SELECT kind, state, approval_id, source_manifest_id, target_manifest_id FROM txn '
+                           'WHERE txn_id = ? AND host_id = ?', (txn_id, pu.host_id())).fetchone()
+    if row is None or row[0] != 'update':
+        say('No update transaction %s on this host.' % txn_id)
+        return INVALID_INPUT
+    kind, state, approval_id, source_id, target_id = row
+    if state != 'approved':
+        say('Transaction %s is %s, not approved. Nothing was done.' % (txn_id, state))
+        return INVALID_TRANSITION
+    found, _ = pu.refresh(store, pu.load_manifest())  # voids an approval that no longer holds (plan 7.1)
+    approval = store.rows('SELECT * FROM approval WHERE approval_id = ?', (approval_id,))[0]
+    state = txn_state(store, txn_id)
+    if state != 'approved':
+        say('Not started: the approval is %s and the transaction is %s.' % (approval['status'], state))
+        announce(store, txn_id)
+        return BLOCKED
+    if approval['window_start'] and approval['window_start'] > pu.now():
+        say('Not started: the maintenance window opens at %s UTC.' % approval['window_start'])
+        return BLOCKED
+    target, source = store.manifest(target_id), store.manifest(source_id)
+    keys = changed_components(source['body'], target['body'])
+    context = {'version': found['nagios-core']['version'], 'ncpa_sha256': found['check-ncpa']['sha256'],
+               'source': source_id, 'target': target_id, 'components': keys}
+    save_context(txn_id, context)
+    transition(store, txn_id, 'preparing', started_at=pu.now())
+    say('Update %s: %s -> %s (%s)' % (txn_id, source_id, target_id, ', '.join(keys) or 'no component changes'))
+
+    say('[1/6] Preflight checks...')
+    reasons = pu.gate(store, target_id, found)
+    if target['sha256'] != approval['manifest_sha256']:
+        reasons.insert(0, 'The manifest digest changed after approval.')
+    if not keys:
+        reasons.append('%s changes no component of %s.' % (target_id, source_id))
+    try:
+        builder_ids()
+    except KeyError:
+        reasons.append('The build user %s does not exist; run configure-monitoring-updates.sh.' % BUILDER)
+    if not reasons:
+        reasons = preflight(store, txn_id, context)
+    if reasons:
+        return stop_here(store, txn_id, approval_id, 'blocked', 'PREFLIGHT_FAILED', ' '.join(reasons))
+    transition(store, txn_id, 'staging')
+
+    say('[2/6] Downloading and building (Nagios and PinPoint web keep running)...')
+    try:
+        ready = stage(store, txn_id, target['body'], keys, fetch)
+    except (BuildError, pu.CatalogError, OSError, subprocess.SubprocessError) as error:
+        shutil.rmtree(str(BUILD_ROOT / txn_id), ignore_errors=True)
+        return stop_here(store, txn_id, approval_id, 'failed', 'BUILD_FAILED', str(error))
+
+    ignore_interrupts()
+    transition(store, txn_id, 'applying')
+    say('[3/6] Stopping PinPoint web and Nagios, creating the recovery point...')
+    down, rp_id = time.time(), None
+    try:
+        update_txn(store, txn_id, step='apply.stop')
+        stop_services()
+        update_txn(store, txn_id, step='apply.recovery-point')
+        rp_id = create_recovery_point(store, txn_id)
+        update_txn(store, txn_id, recovery_point_id=rp_id, step='apply.install')
+        say('  %s created and verified in %.1fs.' % (rp_id, time.time() - down))
+        say('[4/6] Installing %s...' % ', '.join(keys))
+        install_components(store, txn_id, target['body'], ready)
+        if fault:
+            inject(fault, rp_id)
+    except (OSError, RecoveryError, BuildError, subprocess.SubprocessError) as error:
+        say('  Install failed: %s' % error)
+        transition(store, txn_id, 'rolling_back', failure_code='APPLY_FAILED')
+        return finish_update(store, txn_id, approval_id, rollback(store, txn_id, rp_id), down, rp_id)
+    if crash_after_apply:
+        say('Stopping here on purpose (--crash-after-apply). Run "pinpoint-update-exec reconcile" or reboot.')
+        os._exit(RECOVERY_FAILED)
+    update_txn(store, txn_id, step='apply.start')
+    started = time.time()
+    try:
+        start_services()
+    except subprocess.SubprocessError:
+        pass  # a service that will not start is what the health suite reports
+    transition(store, txn_id, 'health_check')
+
+    say('[5/6] Health checks on %s...' % target_id)
+    after = pu.scan()
+    check = dict(context, version=target['body']['components']['nagios-core']['version'],
+                 ncpa_sha256=after['check-ncpa']['sha256'])
+    failed, lines = run_health(txn_id, 'compare', check, since=started - 5)
+    if not failed:
+        transition(store, txn_id, 'succeeded', downtime_seconds=int(time.time() - down),
+                   recovery_status='installed and healthy')
+        pu.set_installed(store, target_id, txn_id)
+        say('  All critical checks pass.')
+        return finish_update(store, txn_id, approval_id, OK, down, rp_id)
+    say('  Failed: %s' % ', '.join(failed_checks(lines)))
+    say('[6/6] Rolling back to %s...' % source_id)
+    transition(store, txn_id, 'rolling_back', failure_code='HEALTH_FAILED')
+    return finish_update(store, txn_id, approval_id, rollback(store, txn_id, rp_id), down, rp_id)
+
+
+def finish_update(store, txn_id, approval_id, result, down, rp_id):
+    downtime = int(time.time() - down)
+    with store.db:
+        store.db.execute('UPDATE txn SET downtime_seconds = ? WHERE txn_id = ?', (downtime, txn_id))
+        store.audit('update.finished', {'result': result, 'downtime_seconds': downtime}, txn_id=txn_id,
+                    who='executor')
+    end_approval(store, approval_id)
+    shutil.rmtree(str(BUILD_ROOT / txn_id), ignore_errors=True)
+    if result == ROLLED_BACK and rp_id:
+        shutil.rmtree(str(RP_ROOT / rp_id / 'failed'), ignore_errors=True)
+    say('Result: %s. Downtime %ds.' % ({OK: 'INSTALLED', ROLLED_BACK: 'ROLLED BACK to the previous version',
+                                        RECOVERY_FAILED: 'RECOVERY FAILED'}.get(result, result), downtime))
+    announce(store, txn_id)
+    return result
+
+
+def run_due(store):
+    """Started by pinpoint-update-run.timer: run a scheduled update whose window has opened."""
+    pu.refresh(store, pu.load_manifest())  # marks missed windows
+    pu.send_notices(store)  # retries notices that could not be sent earlier
+    due = store.rows("SELECT t.txn_id FROM txn t JOIN approval a ON a.approval_id = t.approval_id "
+                     "WHERE t.state = 'approved' AND t.host_id = ? AND a.window_start IS NOT NULL "
+                     'AND a.window_start <= ? ORDER BY a.window_start', (pu.host_id(), pu.now()))
+    for row in due[:1]:
+        return run_update(store, row['txn_id'])
+    return OK
+
+
+##################################################
 # Reconcile
 ##################################################
 
@@ -558,22 +866,41 @@ def reconcile(store, mode):
     who = 'reconcile'
     if mode == 'finish':
         if state == 'rolling_back' and step == 'restore.files-restored':
-            return finish_rollback(store, txn_id, who, load_context(txn_id))
+            result = finish_rollback(store, txn_id, who, load_context(txn_id))
+            finished(store, txn_id)
+            return result
         return OK
     say('Reconciling %s (state %s, last step %s).' % (txn_id, state, step))
     if state in ('preparing', 'staging'):
         shutil.rmtree(str(pu.STATE_DIR / 'build' / txn_id), ignore_errors=True)
+        shutil.rmtree(str(BUILD_ROOT / txn_id), ignore_errors=True)
         transition(store, txn_id, 'failed', who, failure_code='INTERRUPTED',
                    recovery_status='stopped before Nagios was changed')
         if mode == 'now':
             start_services()
         say('Marked failed: it stopped before anything was changed.')
+        finished(store, txn_id, notify=(mode != 'boot'))
         return OK
     if state == 'approved':
         return OK  # nothing was touched; the run timer (a later phase) starts or expires it
     if state in ('applying', 'health_check'):
         transition(store, txn_id, 'rolling_back', who, failure_code='INTERRUPTED')
-    return rollback(store, txn_id, rp_id, at_boot=(mode == 'boot'), who=who) or OK
+    result = rollback(store, txn_id, rp_id, at_boot=(mode == 'boot'), who=who) or OK
+    finished(store, txn_id, notify=(mode != 'boot'))
+    return result
+
+
+def finished(store, txn_id, notify=True):
+    """After a reconcile ends an update: release its approval and send the result notice.
+
+    At boot (before the network and Nagios) the notice waits for the finish step or the run timer.
+    """
+    row = store.db.execute('SELECT kind, approval_id FROM txn WHERE txn_id = ?', (txn_id,)).fetchone()
+    if row and row[0] == 'update' and txn_state(store, txn_id) in pu.FINISHED:
+        end_approval(store, row[1])
+        shutil.rmtree(str(BUILD_ROOT / txn_id), ignore_errors=True)
+        if notify:
+            announce(store, txn_id)
 
 
 def main(argv=None):
@@ -590,6 +917,11 @@ def main(argv=None):
     r.add_argument('--boot', action='store_true', help='at boot, before nagios.service: restore files only')
     r.add_argument('--finish', action='store_true', help='at boot, after the services: run the health suite')
     sub.add_parser('verify', help='check every recorded recovery point that is still on disk')
+    u = sub.add_parser('run', help='install one approved update (started as pinpoint-update-exec@TXN.service)')
+    u.add_argument('txn_id')
+    u.add_argument('--inject', choices=FAULTS, help='staging only: break the update after installing it')
+    u.add_argument('--crash-after-apply', action='store_true', help='staging only: stop after installing')
+    sub.add_parser('run-due', help='run a scheduled update whose window has opened (run timer)')
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         print('pinpoint-update-exec must be run as root.', file=sys.stderr)
@@ -603,6 +935,17 @@ def main(argv=None):
                       'appliance only, and add --yes to confirm.', file=sys.stderr)
                 return PREFLIGHT_FAILED
             return drill(store, args.inject, args.crash_after_apply)
+        if args.command == 'run':
+            if not re.fullmatch(pu.TXN_PATTERN, args.txn_id):
+                print('Invalid transaction ID.', file=sys.stderr)
+                return INVALID_INPUT
+            if (args.inject or args.crash_after_apply) and not (FAULT_MARKER.is_file()
+                                                                 and pu.trusted_file(FAULT_MARKER)):
+                print('Fault injection needs %s (staging appliances only).' % FAULT_MARKER, file=sys.stderr)
+                return INVALID_INPUT
+            return run_update(store, args.txn_id, args.inject, args.crash_after_apply)
+        if args.command == 'run-due':
+            return run_due(store)
         if args.command == 'reconcile':
             if args.boot and args.finish:
                 parser.error('choose --boot or --finish, not both')

@@ -7,6 +7,9 @@ MARKER="/var/lib/pinpoint/web-credentials-pending"
 CREDENTIALS_SCRIPT="/usr/local/bin/pinpoint-web-credentials"
 UPDATE_MENU_MARKER="/var/lib/pinpoint/update-menu-pending"
 UPDATE_PROGRAM="/usr/local/sbin/pinpoint-update"
+# Written by pinpoint-update: update available, scheduled,
+# running or failed. World-readable; holds no secrets.
+UPDATE_NOTICE="/var/lib/pinpoint/update-notice"
 
 # Only run for interactive shells
 case "$-" in
@@ -58,8 +61,18 @@ pinpoint_login_update_menu() {
     fi
 }
 
+# Every login: a few lines when an update needs attention.
+pinpoint_login_update_notice() {
+    if [ -s "$UPDATE_NOTICE" ] && [ ! -f "$UPDATE_MENU_MARKER" ]; then
+        echo
+        head -n 8 "$UPDATE_NOTICE"
+        echo
+    fi
+}
+
 if pinpoint_login_credentials; then
+    pinpoint_login_update_notice
     pinpoint_login_update_menu
 fi
 
-unset -f pinpoint_login_credentials pinpoint_login_update_menu
+unset -f pinpoint_login_credentials pinpoint_login_update_menu pinpoint_login_update_notice
