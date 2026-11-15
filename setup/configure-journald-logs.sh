@@ -57,6 +57,21 @@ install_managed() {
     return 0
 }
 
+# Prints the administrator files (journald.conf and drop-ins under /etc and
+# /run, not PinPoint's own) that set SystemMaxUse or MaxRetentionSec.
+# Vendor files under /usr/lib are not an administrator's choice.
+admin_journal_limits() {
+    local file found=""
+    for file in /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf /run/systemd/journald.conf.d/*.conf; do
+        [ "$file" = "$JOURNALD_DROPIN" ] && continue
+        [ -f "$file" ] || continue
+        if grep -Eq '^[[:space:]]*(SystemMaxUse|MaxRetentionSec)[[:space:]]*=' "$file"; then
+            found="${found:+$found, }$file"
+        fi
+    done
+    echo "$found"
+}
+
 ##################################################
 # Root Check
 ##################################################
@@ -93,10 +108,26 @@ EOT
 
 CHANGED=0
 RC=0
-install_managed "$JOURNALD_TMP" "$JOURNALD_DROPIN" 644 || RC=$?
-rm -f "$JOURNALD_TMP"
+ADMIN_LIMITS="$(admin_journal_limits)"
 
-if [ "$RC" -eq 2 ]; then
+if [ -n "$ADMIN_LIMITS" ]; then
+    # An administrator set the limits elsewhere. Our drop-in would override
+    # journald.conf, so step aside: remove it if it is still ours.
+    rm -f "$JOURNALD_TMP"
+    if [ -e "$JOURNALD_DROPIN" ] && head -n 1 "$JOURNALD_DROPIN" | grep -qxF "$MANAGED_MARK"; then
+        rm -f "$JOURNALD_DROPIN"
+        systemctl restart systemd-journald >> "$LOG" 2>&1 \
+            || fail "Could not restart systemd-journald."
+    fi
+    RC=3
+else
+    install_managed "$JOURNALD_TMP" "$JOURNALD_DROPIN" 644 || RC=$?
+    rm -f "$JOURNALD_TMP"
+fi
+
+if [ "$RC" -eq 3 ]; then
+    echo "✓ Journal limits set by an administrator in $ADMIN_LIMITS; PinPoint's defaults not applied." | tee -a "$LOG"
+elif [ "$RC" -eq 2 ]; then
     echo "✓ $JOURNALD_DROPIN was edited by an administrator; left unchanged." | tee -a "$LOG"
 else
     if [ "$CHANGED" = "1" ]; then
@@ -162,7 +193,7 @@ fi
 echo
 echo "[3/3] Verifying..." | tee -a "$LOG"
 
-if [ -f "$JOURNALD_DROPIN" ] && [ -f "$LOGROTATE_FILE" ]; then
+if { [ -f "$JOURNALD_DROPIN" ] || [ -n "$ADMIN_LIMITS" ]; } && [ -f "$LOGROTATE_FILE" ]; then
     echo "✓ Journal usage: $(journalctl --disk-usage 2> /dev/null | sed 's/^Archived and active journals take up //')" | tee -a "$LOG"
 else
     fail "A log limit file is missing."

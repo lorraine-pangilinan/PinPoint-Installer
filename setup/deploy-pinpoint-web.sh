@@ -396,6 +396,14 @@ if ss -ltnpH 'sport = :80' | grep -q '"apache2"'; then
     fail "Apache is still using port 80. Run configure-nagios.sh first."
 fi
 
+# An upgrade that runs this script from an incomplete or old setup folder
+# would only find a missing companion at the resource-helper step, after
+# the application was updated. Stop here instead, before anything changes.
+for COMPANION in install-resource-helper.sh pinpoint-apply-resources.py; do
+    [ -f "$SCRIPT_DIR/$COMPANION" ] \
+        || fail "$SCRIPT_DIR/$COMPANION is missing. Copy the complete setup folder of this installer version, then run again. Nothing was changed."
+done
+
 if ! curl -fsS -o /dev/null --max-time 20 https://github.com; then
     fail "Cannot reach github.com. Check the gateway and DNS settings."
 fi
@@ -882,6 +890,18 @@ echo
 echo "Installing the resource helper..." | tee -a "$LOG"
 
 RESOURCE_HELPER_LOG="$LOG" bash "$SCRIPT_DIR/install-resource-helper.sh"     || fail "Could not install the resource helper. NCPA deployment would fail."
+
+# Log limits. A server installed before configure-journald-logs.sh existed
+# and upgraded with this script alone would never get them. The script is
+# safe to run again and keeps administrator settings. Not worth undoing an
+# upgrade for, so a problem here is only reported.
+if [ -f "$SCRIPT_DIR/configure-journald-logs.sh" ]; then
+    if bash "$SCRIPT_DIR/configure-journald-logs.sh" >> "$LOG" 2>&1; then
+        echo "✓ Journal and installer log limits in place." | tee -a "$LOG"
+    else
+        echo "WARNING: Could not set the log limits; see /var/log/pinpoint-logs-setup.log. Run configure-journald-logs.sh again later." | tee -a "$LOG"
+    fi
+fi
 
 ##################################################
 # [10/12] Configure Gunicorn

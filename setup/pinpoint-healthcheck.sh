@@ -480,10 +480,16 @@ fi
 
 for CFG in "$NAGIOS_HOST_CFG" "$PLUGIN_SERVICE_CFG"; do
 
-    if [ "$(stat -c '%U:%G %a' "$CFG" 2> /dev/null)" = "$APP_USER:$NAGIOS_GROUP 664" ]; then
-        pass "$(basename "$CFG") is $APP_USER:$NAGIOS_GROUP 664."
+    # The installer creates these 664; the app rewrites them with its own
+    # mode (640 seen). What matters: the app owns and can write them, Nagios
+    # reads them through the group, and they are not world-writable.
+    CFG_OWNER="$(stat -c '%U:%G' "$CFG" 2> /dev/null)"
+    CFG_MODE="$(stat -c '%a' "$CFG" 2> /dev/null)"
+    if [ "$CFG_OWNER" = "$APP_USER:$NAGIOS_GROUP" ] && [ -n "$CFG_MODE" ] \
+        && (( (8#$CFG_MODE & 8#200) && (8#$CFG_MODE & 8#040) && !(8#$CFG_MODE & 8#002) )); then
+        pass "$(basename "$CFG") is $CFG_OWNER $CFG_MODE (owner writes, group reads)."
     else
-        fail "$CFG is $(stat -c '%U:%G %a' "$CFG" 2> /dev/null || echo missing) (expected $APP_USER:$NAGIOS_GROUP 664)."
+        fail "$CFG is ${CFG_OWNER:-missing} ${CFG_MODE} (expected $APP_USER:$NAGIOS_GROUP, owner-writable, group-readable, not world-writable)."
     fi
 
     if grep -qx "cfg_file=$CFG" "$NAGIOS_CFG"; then

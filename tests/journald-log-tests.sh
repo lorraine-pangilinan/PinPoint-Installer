@@ -115,6 +115,39 @@ fi
 
 rm -f "$TESTLOG" "$TESTLOG".1 "$TESTLOG".*.gz
 
+# J10: limits an administrator set in journald.conf win; PinPoint's drop-in
+# (which would override them) is removed while it is still unedited.
+cp -p /etc/systemd/journald.conf /etc/systemd/journald.conf.test-save
+echo 'SystemMaxUse=300M' >> /etc/systemd/journald.conf
+OUTPUT="$(bash "$SCRIPT" 2>&1)"
+
+if [ ! -e "$DROPIN" ] && echo "$OUTPUT" | grep -q 'set by an administrator in /etc/systemd/journald.conf'; then
+    record J10 PASS "administrator limit in journald.conf kept; PinPoint drop-in removed"
+else
+    record J10 FAIL "PinPoint drop-in still present or no message"
+fi
+
+# J11: the same for an administrator drop-in under /etc/systemd/journald.conf.d.
+mv -f /etc/systemd/journald.conf.test-save /etc/systemd/journald.conf
+printf '[Journal]\nMaxRetentionSec=90day\n' > /etc/systemd/journald.conf.d/zz-site.conf
+bash "$SCRIPT" > /dev/null 2>&1
+
+if [ ! -e "$DROPIN" ]; then
+    record J11 PASS "administrator drop-in kept; PinPoint drop-in not written"
+else
+    record J11 FAIL "PinPoint drop-in written despite an administrator drop-in"
+fi
+
+# J12: with the administrator settings gone, the defaults come back.
+rm -f /etc/systemd/journald.conf.d/zz-site.conf
+bash "$SCRIPT" > /dev/null 2>&1
+
+if grep -qx 'SystemMaxUse=200M' "$DROPIN" 2> /dev/null; then
+    record J12 PASS "defaults restored once no administrator limit is set"
+else
+    record J12 FAIL "defaults not restored"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL" | tee -a "$OUT"
 
