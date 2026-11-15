@@ -7,7 +7,9 @@
 #          rotation set up by configure-journald-logs.sh,
 #          on a disposable test VM, as root.
 #
-# Usage: sudo ./journald-log-tests.sh
+# Usage: sudo ./journald-log-tests.sh [configure-journald-logs.sh]
+#        defaults to this checkout's setup/ folder,
+#        else /root/pinpoint (ISO layout)
 #
 # Output: one line per case, "ID|STATUS|note", then a
 # summary. Also written to /root/journald-log-output.txt.
@@ -19,7 +21,13 @@ set -u
 OUT="/root/journald-log-output.txt"
 DROPIN="/etc/systemd/journald.conf.d/pinpoint.conf"
 LOGROTATE="/etc/logrotate.d/pinpoint"
-SCRIPT="${1:-/root/pinpoint/configure-journald-logs.sh}"
+# Default: this checkout's setup/ folder, else /root/pinpoint (issue #15).
+REPO_SETUP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../setup" 2> /dev/null && pwd)"
+SCRIPT="${1:-${REPO_SETUP:-/root/pinpoint}/configure-journald-logs.sh}"
+if [ ! -f "$SCRIPT" ]; then
+    echo "ERROR: $SCRIPT not found. Pass the script: $0 /path/to/configure-journald-logs.sh"
+    exit 1
+fi
 
 PASS=0
 FAIL=0

@@ -11,7 +11,8 @@
 # with the reason, never reported as passed.
 #
 # Usage: sudo ./smtp-admin-email-tests.sh [setup-dir]
-#        setup-dir defaults to /root/pinpoint
+#        setup-dir defaults to this checkout's setup/
+#        folder, else /root/pinpoint (ISO layout)
 #
 # Output: one line per case, "ID|STATUS|note", then a
 # summary. Also written to /root/smtp-test-output.txt.
@@ -20,7 +21,14 @@
 
 set -u
 
-SETUP_DIR="${1:-/root/pinpoint}"
+# Default: the setup/ folder of this checkout, else /root/pinpoint (ISO
+# layout). A wrong folder would show up as "syntax errors" (issue #15).
+REPO_SETUP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../setup" 2> /dev/null && pwd)"
+SETUP_DIR="${1:-${REPO_SETUP:-/root/pinpoint}}"
+if ! compgen -G "$SETUP_DIR/*.sh" > /dev/null; then
+    echo "ERROR: No installer scripts in '$SETUP_DIR'. Pass the setup folder: $0 /path/to/setup"
+    exit 1
+fi
 OUT="/root/smtp-test-output.txt"
 DEPLOY_LOG="/var/log/pinpoint-web.log"
 SERVER_DIR="/opt/pinpoint/Network-Diagnosis-System/server"

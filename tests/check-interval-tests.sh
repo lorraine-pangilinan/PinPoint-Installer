@@ -16,7 +16,8 @@
 # the reason, never reported as passed.
 #
 # Usage: sudo ./check-interval-tests.sh [setup-dir]
-#        setup-dir defaults to /root/pinpoint
+#        setup-dir defaults to this checkout's setup/
+#        folder, else /root/pinpoint (ISO layout)
 #
 # Optional environment:
 #   ADMIN_EMAIL, ADMIN_PASSWORD   an administrator that
@@ -38,7 +39,14 @@
 
 set -u
 
-SETUP_DIR="${1:-/root/pinpoint}"
+# Default: the setup/ folder of this checkout, else /root/pinpoint (ISO
+# layout). A wrong folder would show up as "syntax errors" (issue #15).
+REPO_SETUP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../setup" 2> /dev/null && pwd)"
+SETUP_DIR="${1:-${REPO_SETUP:-/root/pinpoint}}"
+if ! compgen -G "$SETUP_DIR/*.sh" > /dev/null; then
+    echo "ERROR: No installer scripts in '$SETUP_DIR'. Pass the setup folder: $0 /path/to/setup"
+    exit 1
+fi
 OUT="/root/check-interval-test-output.txt"
 STATE_FILE="/root/.check-interval-test-admin"
 CREDENTIALS_FILE="/root/pinpoint-install-credentials.txt"
@@ -304,10 +312,22 @@ else
     record 2.2 FAIL "allowed:$REFUSED"
 fi
 
-SUDO_LIST="$(runuser -u pinpoint -- sudo -n -l 2> /dev/null | grep -E '^\s+\(' )"
-EXTRA="$(echo "$SUDO_LIST" | grep -v -E 'systemctl reload nagios|systemctl restart nagios|pinpoint-apply-smtp' | tr '\n' ' ')"
-if [ -z "$EXTRA" ]; then
-    record 2.3 PASS "only the reload and restart rules and the SMTP helper rule"
+# Every rule the installer gives pinpoint, exactly as "sudo -l" prints it
+# (Ubuntu 22.04). Whole lines are compared, so a rule with extra arguments
+# or a wildcard is reported too. Add a line here when the installer adds a rule.
+#   configure-pinpoint-privileges.sh  reload, restart, SMTP helper
+#   install-resource-helper.sh        resource helper (issue #16)
+ALLOWED_RULES='(root) NOPASSWD: /usr/bin/systemctl reload nagios, /bin/systemctl reload nagios
+(root) NOPASSWD: /usr/bin/systemctl restart nagios
+(root) NOPASSWD: /usr/local/sbin/pinpoint-apply-smtp \"\"
+(root) NOPASSWD: /usr/local/sbin/pinpoint-apply-resources \"\"'
+
+SUDO_LIST="$(runuser -u pinpoint -- sudo -n -l 2> /dev/null | grep -E '^\s+\(' | sed 's/^[[:space:]]*//')"
+EXTRA="$(echo "$SUDO_LIST" | grep -v -x -F -e "$ALLOWED_RULES" | tr '\n' ' ')"
+if [ -z "$SUDO_LIST" ]; then
+    record 2.3 FAIL "could not list pinpoint's sudo rules"
+elif [ -z "$EXTRA" ]; then
+    record 2.3 PASS "only the reload, restart, SMTP helper and resource helper rules"
 else
     record 2.3 FAIL "extra rights: $EXTRA"
 fi
