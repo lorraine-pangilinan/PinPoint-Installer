@@ -27,6 +27,10 @@
 #       and keeps the new login in $STATE_FILE (600).
 #   SKIP_SCAN=1   do not run a discovery scan; the
 #       cases that need a monitored host are SKIPPED.
+#   SCAN_TARGET=IP  scan only this device instead of the
+#       saved networks (minutes instead of up to an hour).
+#   SCAN_TIMEOUT=SECONDS  how long to wait for the scan
+#       (default 6000).
 #   SKIP_CADENCE=1  skip the slow case that watches two
 #       Nagios checks (about 5 minutes).
 #
@@ -570,9 +574,17 @@ print(json.dumps(d))")" | api_code)"
     # It is only started when hosts.cfg has no host yet; SCAN_TIMEOUT is in seconds.
     if [ "${SKIP_SCAN:-0}" != "1" ] && [ "${HOST_COUNT:-0}" -eq 0 ]; then
         ensure_session
-        START_CODE="$(api POST /api/system/discover/start | api_code)"
+        # The app wants a JSON body: {} scans the saved networks, {"target": ...} one device.
+        if [ -n "${SCAN_TARGET:-}" ]; then
+            SCAN_BODY="{\"target\": \"$SCAN_TARGET\"}"
+        else
+            SCAN_BODY="{}"
+        fi
+        START_CODE="$(api POST /api/system/discover/start "$SCAN_BODY" | api_code)"
         WAITED=0
         STATE=""
+        # A refused start would otherwise wait out the whole timeout.
+        case "$START_CODE" in 2??) ;; *) WAITED="${SCAN_TIMEOUT:-6000}" ;; esac
         while [ "$WAITED" -lt "${SCAN_TIMEOUT:-6000}" ]; do
             sleep 30
             WAITED=$((WAITED + 30))
