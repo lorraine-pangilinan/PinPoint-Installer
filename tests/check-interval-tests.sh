@@ -16,7 +16,8 @@
 # the reason, never reported as passed.
 #
 # Usage: sudo ./check-interval-tests.sh [setup-dir]
-#        setup-dir defaults to /root/pinpoint
+#        setup-dir defaults to this checkout's setup/
+#        folder, else /root/pinpoint (ISO layout)
 #
 # Optional environment:
 #   ADMIN_EMAIL, ADMIN_PASSWORD   an administrator that
@@ -26,6 +27,10 @@
 #       and keeps the new login in $STATE_FILE (600).
 #   SKIP_SCAN=1   do not run a discovery scan; the
 #       cases that need a monitored host are SKIPPED.
+#   SCAN_TARGET=IP  scan only this device instead of the
+#       saved networks (minutes instead of up to an hour).
+#   SCAN_TIMEOUT=SECONDS  how long to wait for the scan
+#       (default 6000).
 #   SKIP_CADENCE=1  skip the slow case that watches two
 #       Nagios checks (about 5 minutes).
 #
@@ -38,7 +43,14 @@
 
 set -u
 
-SETUP_DIR="${1:-/root/pinpoint}"
+# Default: the setup/ folder of this checkout, else /root/pinpoint (ISO
+# layout). A wrong folder would show up as "syntax errors" (issue #15).
+REPO_SETUP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../setup" 2> /dev/null && pwd)"
+SETUP_DIR="${1:-${REPO_SETUP:-/root/pinpoint}}"
+if ! compgen -G "$SETUP_DIR/*.sh" > /dev/null; then
+    echo "ERROR: No installer scripts in '$SETUP_DIR'. Pass the setup folder: $0 /path/to/setup"
+    exit 1
+fi
 OUT="/root/check-interval-test-output.txt"
 STATE_FILE="/root/.check-interval-test-admin"
 CREDENTIALS_FILE="/root/pinpoint-install-credentials.txt"
@@ -304,10 +316,22 @@ else
     record 2.2 FAIL "allowed:$REFUSED"
 fi
 
-SUDO_LIST="$(runuser -u pinpoint -- sudo -n -l 2> /dev/null | grep -E '^\s+\(' )"
-EXTRA="$(echo "$SUDO_LIST" | grep -v -E 'systemctl reload nagios|systemctl restart nagios|pinpoint-apply-smtp' | tr '\n' ' ')"
-if [ -z "$EXTRA" ]; then
-    record 2.3 PASS "only the reload and restart rules and the SMTP helper rule"
+# Every rule the installer gives pinpoint, exactly as "sudo -l" prints it
+# (Ubuntu 22.04). Whole lines are compared, so a rule with extra arguments
+# or a wildcard is reported too. Add a line here when the installer adds a rule.
+#   configure-pinpoint-privileges.sh  reload, restart, SMTP helper
+#   install-resource-helper.sh        resource helper (issue #16)
+ALLOWED_RULES='(root) NOPASSWD: /usr/bin/systemctl reload nagios, /bin/systemctl reload nagios
+(root) NOPASSWD: /usr/bin/systemctl restart nagios
+(root) NOPASSWD: /usr/local/sbin/pinpoint-apply-smtp \"\"
+(root) NOPASSWD: /usr/local/sbin/pinpoint-apply-resources \"\"'
+
+SUDO_LIST="$(runuser -u pinpoint -- sudo -n -l 2> /dev/null | grep -E '^\s+\(' | sed 's/^[[:space:]]*//')"
+EXTRA="$(echo "$SUDO_LIST" | grep -v -x -F -e "$ALLOWED_RULES" | tr '\n' ' ')"
+if [ -z "$SUDO_LIST" ]; then
+    record 2.3 FAIL "could not list pinpoint's sudo rules"
+elif [ -z "$EXTRA" ]; then
+    record 2.3 PASS "only the reload, restart, SMTP helper and resource helper rules"
 else
     record 2.3 FAIL "extra rights: $EXTRA"
 fi
@@ -550,9 +574,17 @@ print(json.dumps(d))")" | api_code)"
     # It is only started when hosts.cfg has no host yet; SCAN_TIMEOUT is in seconds.
     if [ "${SKIP_SCAN:-0}" != "1" ] && [ "${HOST_COUNT:-0}" -eq 0 ]; then
         ensure_session
-        START_CODE="$(api POST /api/system/discover/start | api_code)"
+        # The app wants a JSON body: {} scans the saved networks, {"target": ...} one device.
+        if [ -n "${SCAN_TARGET:-}" ]; then
+            SCAN_BODY="{\"target\": \"$SCAN_TARGET\"}"
+        else
+            SCAN_BODY="{}"
+        fi
+        START_CODE="$(api POST /api/system/discover/start "$SCAN_BODY" | api_code)"
         WAITED=0
         STATE=""
+        # A refused start would otherwise wait out the whole timeout.
+        case "$START_CODE" in 2??) ;; *) WAITED="${SCAN_TIMEOUT:-6000}" ;; esac
         while [ "$WAITED" -lt "${SCAN_TIMEOUT:-6000}" ]; do
             sleep 30
             WAITED=$((WAITED + 30))
@@ -588,6 +620,8 @@ print(json.dumps(d))")" | api_code)"
         HUP_BEFORE="$(grep -c 'Caught SIGHUP' "$NAGIOS_LOG")"
         MAIN_PID="$(systemctl show nagios -p MainPID --value)"
         BACKUP_BEFORE="$(ls "$SERVER_DIR/running-host-config-backup" 2> /dev/null | wc -l)"
+        touch "$WORK/interval-change-start"
+        sleep 1
 
         CODE="$(set_interval 2)"
         sleep 5
@@ -599,11 +633,15 @@ print(json.dumps(d))")" | api_code)"
             record 5.4 FAIL "HTTP $CODE, values: $NEW_VALUES, $(head -c 160 "$WORK/put.body")"
         fi
 
+        # The app names backups by the minute (host-DD-MM-YYYY-HH-MM.cfg), so a
+        # change in the same minute as an earlier one (a scan, say) rewrites
+        # that file instead of adding one. Either counts as a backup made now.
         BACKUP_AFTER="$(ls "$SERVER_DIR/running-host-config-backup" 2> /dev/null | wc -l)"
-        if [ "$BACKUP_AFTER" -gt "$BACKUP_BEFORE" ]; then
-            record 5.5 PASS "backup of the previous config added ($BACKUP_BEFORE to $BACKUP_AFTER)"
+        BACKUP_NEW="$(find "$SERVER_DIR/running-host-config-backup" -type f -newer "$WORK/interval-change-start" 2> /dev/null | head -n 1)"
+        if [ -n "$BACKUP_NEW" ]; then
+            record 5.5 PASS "backup of the previous config written: $(basename "$BACKUP_NEW") ($BACKUP_BEFORE to $BACKUP_AFTER files)"
         else
-            record 5.5 FAIL "no new file in running-host-config-backup"
+            record 5.5 FAIL "no backup written to running-host-config-backup"
         fi
 
         HUP_AFTER="$(grep -c 'Caught SIGHUP' "$NAGIOS_LOG")"
