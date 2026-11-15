@@ -65,6 +65,7 @@ OBJECTS_CACHE = Path('/usr/local/nagios/var/objects.cache')
 RECIPIENT_GROUP = 'system_users'
 MAIL = '/bin/mail'
 MAX_SEND_ATTEMPTS = 10
+NOTICE_LOCK = 'notices.lock'  # in STATE_DIR; held while notices are sent
 AUTO_UPGRADES = Path('/etc/apt/apt.conf.d/20auto-upgrades')
 EXEC_UNIT = 'pinpoint-update-exec@%s.service'
 COMPONENTS = (('nagios-core', 'Nagios Core'), ('nagios-plugins', 'Nagios Plugins'), ('check-ncpa', 'check_ncpa'))
@@ -1119,8 +1120,37 @@ def queue_notice(store, kind, subject, body, manifest_id=None, txn_id=None):
     return bool(added)
 
 
+def notice_lock(store):
+    """One sender at a time: the discover and run timers and the executor all send. None if busy."""
+    try:
+        import fcntl  # Linux only; imported here so the unit tests also run on other systems
+    except ImportError:
+        return -1
+    fd = os.open(str(store.dir / NOTICE_LOCK), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def send_notices(store, sender=None):
-    """Send what is pending. Without a real address the notice stays pending and the banner shows it."""
+    """Send what is pending. Without a real address the notice stays pending and the banner shows it.
+
+    If another process is sending, this one leaves the notices to it; the next timer run retries.
+    """
+    lock = notice_lock(store)
+    if lock is None:
+        return 0
+    try:
+        return send_pending(store, sender)
+    finally:
+        if lock >= 0:
+            os.close(lock)
+
+
+def send_pending(store, sender):
     pending = store.rows('SELECT * FROM notice WHERE sent_at IS NULL AND attempts < ? ORDER BY created_at, rowid',
                          (MAX_SEND_ATTEMPTS,))
     if not pending:
@@ -1135,9 +1165,10 @@ def send_notices(store, sender=None):
     for notice in pending:
         ok, error = (sender or send_mail)(to, notice['subject'], notice['body'])
         with store.db:
+            # Only a notice still unsent: a sent notice is never reopened, so it is never sent twice.
             store.db.execute('UPDATE notice SET attempts = attempts + 1, sent_at = ?, last_error = ? '
-                             'WHERE notice_id = ?', (now() if ok else None, error if not ok else None,
-                                                     notice['notice_id']))
+                             'WHERE notice_id = ? AND sent_at IS NULL',
+                             (now() if ok else None, error if not ok else None, notice['notice_id']))
             store.audit('notice.sent' if ok else 'notice.failed',
                         {'kind': notice['kind'], 'recipients': len(to), **({} if ok else {'error': error})},
                         notice['manifest_id'], notice['txn_id'], who='system')

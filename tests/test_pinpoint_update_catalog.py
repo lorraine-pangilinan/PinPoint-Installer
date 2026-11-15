@@ -262,6 +262,37 @@ class CatalogTest(unittest.TestCase):
         for word in ('password', 'token', 'http://'):
             self.assertNotIn(word, body)
 
+    @unittest.skipUnless(os.name == 'posix', 'flock is Linux only')
+    def test_ntc06_second_sender_leaves_notices_to_the_first(self):
+        import fcntl
+        self.objects_cache(['admin@uni.edu'])
+        self.discover()
+        self.pu.notice_available(self.store, self.store.manifest(CANDIDATE))
+        fd = os.open(str(self.store.dir / self.pu.NOTICE_LOCK), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # another timer or the executor is sending
+            self.assertEqual(self.pu.send_notices(self.store, lambda *a: self.fail('must not send')), 0)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.pu.send_notices(self.store, lambda *a: (True, None)), 1)
+
+    def test_ntc07_a_notice_sent_elsewhere_is_never_reopened(self):
+        # Found on the VM: a failure in one process put a notice another had sent back to
+        # pending, and it was mailed twice.
+        self.objects_cache(['admin@uni.edu'])
+        self.discover()
+        self.pu.notice_available(self.store, self.store.manifest(CANDIDATE))
+
+        def sent_meanwhile(to, subject, body):
+            with self.store.db:
+                self.store.db.execute("UPDATE notice SET sent_at = 'elsewhere', attempts = 1")
+            return False, 'relay timeout'
+
+        self.pu.send_notices(self.store, sent_meanwhile)
+        row = self.store.rows('SELECT sent_at, attempts FROM notice')[0]
+        self.assertEqual((row['sent_at'], row['attempts']), ('elsewhere', 1))
+        self.assertEqual(self.pu.send_notices(self.store, lambda *a: self.fail('must not send twice')), 0)
+
     # UT-BAN: login notice --------------------------------------------------
 
     def test_ban01_login_notice_shows_an_available_update_and_goes_away(self):
