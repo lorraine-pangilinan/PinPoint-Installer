@@ -620,6 +620,8 @@ print(json.dumps(d))")" | api_code)"
         HUP_BEFORE="$(grep -c 'Caught SIGHUP' "$NAGIOS_LOG")"
         MAIN_PID="$(systemctl show nagios -p MainPID --value)"
         BACKUP_BEFORE="$(ls "$SERVER_DIR/running-host-config-backup" 2> /dev/null | wc -l)"
+        touch "$WORK/interval-change-start"
+        sleep 1
 
         CODE="$(set_interval 2)"
         sleep 5
@@ -631,11 +633,15 @@ print(json.dumps(d))")" | api_code)"
             record 5.4 FAIL "HTTP $CODE, values: $NEW_VALUES, $(head -c 160 "$WORK/put.body")"
         fi
 
+        # The app names backups by the minute (host-DD-MM-YYYY-HH-MM.cfg), so a
+        # change in the same minute as an earlier one (a scan, say) rewrites
+        # that file instead of adding one. Either counts as a backup made now.
         BACKUP_AFTER="$(ls "$SERVER_DIR/running-host-config-backup" 2> /dev/null | wc -l)"
-        if [ "$BACKUP_AFTER" -gt "$BACKUP_BEFORE" ]; then
-            record 5.5 PASS "backup of the previous config added ($BACKUP_BEFORE to $BACKUP_AFTER)"
+        BACKUP_NEW="$(find "$SERVER_DIR/running-host-config-backup" -type f -newer "$WORK/interval-change-start" 2> /dev/null | head -n 1)"
+        if [ -n "$BACKUP_NEW" ]; then
+            record 5.5 PASS "backup of the previous config written: $(basename "$BACKUP_NEW") ($BACKUP_BEFORE to $BACKUP_AFTER files)"
         else
-            record 5.5 FAIL "no new file in running-host-config-backup"
+            record 5.5 FAIL "no backup written to running-host-config-backup"
         fi
 
         HUP_AFTER="$(grep -c 'Caught SIGHUP' "$NAGIOS_LOG")"
