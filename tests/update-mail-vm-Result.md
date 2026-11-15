@@ -86,6 +86,20 @@ New unit tests: `test_ntc06_second_sender_leaves_notices_to_the_first`,
 | 2 | 36 / 39 | Product fix in. Three test faults: M09c counted audit rows from run 1, the test server's password was on its command line (logged by systemd), and M15c treated two rolled-back notices for the same update set (same subject, different transaction) as a duplicate. |
 | 3 | **39 / 39** | |
 
+## Real relay (Gmail)
+
+After the runner, the relay was set to `smtp.gmail.com:587` (STARTTLS, `adminraine@gmail.com`,
+Gmail app password) through `pinpoint-apply-smtp`, and one test notice was sent by
+`pinpoint-update discover` with `notify_to = adminraine@gmail.com`.
+
+| Step | Result |
+|---|---|
+| First app password (one letter mistyped) | Rejected: `535 5.7.8 Username and Password not accepted`. Notice stayed pending (attempt 1), error recorded, no password in the logs. |
+| Correct app password | `smtpstatus=250 2.0.0 OK`, notice marked sent on attempt 2. Subject `[PinPoint user-1] Real relay test: update notices reach this inbox`. |
+
+A wrong password is reported and retried, and once it is fixed the waiting notice goes out without
+anyone queueing it again.
+
 ## Notes
 
 - Two rolled-back attempts of one update set produce two mails with the same subject. The body
