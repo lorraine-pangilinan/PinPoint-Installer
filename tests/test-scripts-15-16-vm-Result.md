@@ -35,3 +35,26 @@ and compares whole lines. Before, a rule only had to contain one of three phrase
 
 The SMTP runner rewrites `/etc/msmtprc`; it was saved before and put back after (X15-s4). Nagios and
 PinPoint web were running at the end (Z1).
+
+## Monitored-host cases (5.3-5.9, 5.12)
+
+These were skipped above because the VM monitored no device. Getting them to run found two more
+faults in `check-interval-tests.sh`, both fixed on this branch:
+
+| Fault | Effect | Fix |
+|---|---|---|
+| The runner started discovery with an empty request; the app wants a JSON body (`{}` or `{"target": ...}`) and answered 400 | The scan never started, and the runner then waited out `SCAN_TIMEOUT` (default 6000 s). This is the "hang" in the comment on #15. | Send `{}`, add `SCAN_TARGET=IP` to scan one device, stop waiting when the start is refused |
+| 5.5 counted backup files | The app names hosts.cfg backups by the minute (`host-DD-MM-YYYY-HH-MM.cfg`), so an interval change in the same minute as a scan rewrites that file instead of adding one; 5.5 failed although the backup was made | Pass when a backup is written or rewritten after the change |
+
+Final run (`SKIP_SCAN=1`, devices `gateway` 192.168.130.1 and `dev-2f8e99` 192.168.130.3 added
+through PinPoint's own discovery with `SCAN_TARGET`): **PASS 36, FAIL 0, SKIP 4.** 5.3-5.9 and 5.12 all
+pass; 5.7 measured host checks 120 s apart at a 2-minute interval. The 4 skips need a pre-60 snapshot
+(1.11, 3.8, 5.2) or have no installer check (5.13).
+
+On the first try 5.7 watched `gateway`, which does not answer ping and is DOWN, so its checks
+followed a different schedule (90 s). The runner prefers an UP host; once one existed it was chosen.
+
+Notes for the app (not changed here): two configuration changes in the same minute keep only one
+hosts.cfg backup, because the backup name has no seconds.
+
+VM state: the two devices stay monitored in PinPoint; the check interval is back to 5 minutes.
